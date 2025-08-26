@@ -624,7 +624,7 @@ int main() {
         cpu.load_program_lines(prog);
         cpu.run();
 
-        // Dump 8-bit RAM
+        // Dump 8-bit RAM heh
         std::cout << "Executing instruction: LWSB r81 [" << ram8_base << "]\n";
         std::cout << "Dumping 8-bit RAM region:\n";
         for (int i = 0; i < cpu.ram8_size; i++) {
