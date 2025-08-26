@@ -1,6 +1,6 @@
 @echo off
-REM Ensure we're on the main branch (create if it doesn't exist)
-git branch | findstr /r "^* main" >nul
+REM Switch to main branch (create if it doesn't exist)
+git checkout main 2>nul
 if %errorlevel% neq 0 git checkout -b main
 
 REM Add all changes
