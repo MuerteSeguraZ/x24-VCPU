@@ -1,5 +1,7 @@
 @echo off
 
+git checkout master
+
 git add --all
 
 set "MSG=%~1"
@@ -9,6 +11,6 @@ git status
 
 git commit -m "%MSG%"
 
-git push origin master
+git push -u origin master
 
 pause
