@@ -528,6 +528,55 @@ if ((op.size() >= 3) && (op.find("AND") != string::npos || op.find("OR") != stri
       continue;
   }
 
+// Increment / Decrement shortcuts
+if (op == "INC" || op == "DEC") {
+    if (toks.size() < 2) throw runtime_error(op + " needs 1 argument");
+    string A = toks[1];
+
+    if (is_r8(A)) {
+        int idx = stoi(A.substr(2));
+        if (op == "INC") regs8[idx] = (u8)(regs8[idx] + 1);
+        else regs8[idx] = (u8)(regs8[idx] - 1);
+    }
+    else if (is_r16(A)) {
+        int idx = stoi(A.substr(3));
+        if (op == "INC") regs16[idx] = (u16)(regs16[idx] + 1);
+        else regs16[idx] = (u16)(regs16[idx] - 1);
+    }
+    else if (A.front() == '[' && A.back() == ']') {   // <-- memory
+        int addr = stoi(A.substr(1, A.size() - 2));
+        if (op == "INC") mem[addr] += 1;
+        else mem[addr] -= 1;
+    }
+    else throw runtime_error(op + " operand must be r8N, r16N, or [addr]");
+
+    continue;
+}
+
+if (op == "NEG") {
+    if (toks.size() < 2) throw runtime_error("NEG needs 1 argument");
+    string A = toks[1];
+    A.erase(0, A.find_first_not_of(" \t\r\n")); // left trim
+    A.erase(A.find_last_not_of(" \t\r\n") + 1); // right trim
+
+    if (is_r8(A)) {
+        int idx = stoi(A.substr(2));
+        regs8[idx] = (u8)(-regs8[idx]); // wrap in u8
+    }
+    else if (is_r16(A)) {
+        int idx = stoi(A.substr(3));
+        regs16[idx] = (u16)(-regs16[idx]); // wrap in u16
+    }
+    else if (A.front() == '[' && A.back() == ']') {
+        // parse address and negate memory
+        int addr = stoi(A.substr(1, A.size() - 2));
+        mem[addr] = (u8)(-mem[addr]);
+    }
+    else throw runtime_error("NEG operand must be r8N, r16N, or [addr]");
+
+    continue;
+}
+
 if (op == "JMP") {
     if (toks.size() < 2) throw runtime_error("JMP needs a label");
     string lbl = toks[1];
@@ -589,38 +638,54 @@ int main() {
 
         // Program with proper arithmetic so r81 gets a non-zero value
         vector<string> prog = {
-            "# Initialize registers",
-            "LPUT 5 r80",    // counter
-            "LPUT 0 r81",    // accumulator
-            "LPUT 1 r82",    // subtractor
-            "LPUT 15 r83",   // not used in this example
+    "# Initialize registers",
+    "LPUT 5 r80",    // counter
+    "LPUT 0 r81",    // accumulator
+    "LPUT 1 r82",    // subtractor
+    "LPUT 15 r83",   // not used in this example
 
-            "# Loop: sum numbers from 5 down to 1",
-            "loop_start:",
-            "LCMP 0 r80",
-            "JE loop_end",
-            "LUADD r80 r81",   // r81 = r81 + r80
-            "LUSUB r82 r80",   // r80 = r80 - r82
-            "LPUT 1 r82",      // reset r82 to 1
-            "JMP loop_start",
-            "loop_end:",
+    "# Loop: sum numbers from 5 down to 1",
+    "loop_start:",
+    "LCMP 0 r80",
+    "JE loop_end",
+    "LUADD r80 r81",   // r81 = r81 + r80
+    "LUSUB r82 r80",   // r80 = r80 - r82
+    "LPUT 1 r82",      // reset r82 to 1
+    "JMP loop_start",
+    "loop_end:",
 
-            "# Bitwise tests",
-            "LAND r80 r81",
-            "LOR r80 r81",
-            "LXOR r80 r81",
-            "LNOT r81",
-            "LSHL r82 r81",
-            "LSHR r82 r81",
+    "# Bitwise tests",
+    "LAND r80 r81",
+    "LOR r80 r81",
+    "LXOR r80 r81",
+    "LNOT r81",
+    "LSHL r82 r81",
+    "LSHR r82 r81",
 
-            "DUMP REGS",
-            "DUMP MEM 0 16",
+    "# Increment / Decrement tests",
+    "INC r80",      // increment r80 by 1
+    "DEC r81",      // decrement r81 by 1
+    "INC r82",      // increment r82 by 1
+    "DEC r83",      // decrement r83 by 1
 
-            "# Write r81 to 8-bit RAM",
-            "LWSB r81 [" + std::to_string(ram8_base) + "]",
-            "QUIT"
-        };
+    "# Negation tests",
+    "NEG r80",            // r80 = -r80 (wraps around in u8)
+    "NEG r81",            // r81 = -r81
+    "NEG r82",            // r82 = -r82
+    "NEG r83",            // r83 = -r83
+    "NEG [" + std::to_string(ram8_base) + "]",       // negate 8-bit RAM at ram8_base
+    "NEG [" + std::to_string(ram8_base + 1) + "]"  ,  // negate 8-bit RAM at ram8_base + 1
 
+
+    "DUMP REGS",
+    "DUMP MEM 0 16",
+
+    "# Write r81 to 8-bit RAM",
+    "LWSB r81 [" + std::to_string(ram8_base) + "]",
+    "INC [" + std::to_string(ram8_base) + "]",
+    "DEC [" + std::to_string(ram8_base + 1) + "]",
+    "QUIT"
+};
         cpu.load_program_lines(prog);
         cpu.run();
 
