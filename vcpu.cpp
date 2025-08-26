@@ -1,9 +1,6 @@
-// vcpu.cpp
-// Simple virtual CPU implementation matching user's spec.
-// Compile: g++ -std=c++17 vcpu.cpp -O2 -o vcpu
-
 #include <bits/stdc++.h>
 using namespace std;
+unordered_map<string, size_t> labels;
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -41,6 +38,26 @@ struct CPU {
     vector<u8> mem;
     size_t mem_size = 65536;
 
+    void set_flags(int a, int b) {
+    int res = b - a;
+    ZF = (res == 0);
+    SF = (res < 0);
+}
+
+    void preprocess_labels() {
+    labels.clear();
+    for (size_t i = 0; i < program.size(); ++i) {
+        string line = trim(program[i]);
+        if (!line.empty() && line.back() == ':') {
+            string label = line.substr(0, line.size() - 1);
+            labels[label] = i;
+        }
+    }
+}
+
+    bool ZF = false;
+    bool SF = false;
+
     // layout config
     size_t program_region = 0; // program placed at start
     size_t program_size = 0;
@@ -66,20 +83,14 @@ struct CPU {
     void load_program_lines(const vector<string>& lines) {
         program = lines;
         program_size = lines.size();
-        // place ram regions after program area. We don't actually encode binary program into mem in this simple VM.
-        // We'll define memory regions:
-        size_t reserve = 0; // textual program not stored in mem; but we set offsets so addresses map to memory.
+        size_t reserve = 0; 
         ram16_offset = 0 + reserve;
-        // Ensure there is space for both RAM regions within mem_size
-        // Put ram8 at end of memory
         if (ram8_size > 256) ram8_size = 256;
         ram8_offset = mem_size - ram8_size;
-        // Let ram16 occupy from ram16_offset up to (ram8_offset - 1)
         if (ram16_offset >= ram8_offset) throw runtime_error("not enough memory for configured regions");
         ram16_size = min(ram16_size, ram8_offset - ram16_offset);
     }
 
-    // operand resolution helpers
     bool is_r8(const string &s) {
         if (s.size() < 3) return false;
         if (s.rfind("r8",0)==0) {
@@ -113,7 +124,6 @@ struct CPU {
         return false;
     }
 
-    // parse integer (signed/unsigned) from token (supports 0x... hex)
     int parse_int(const string &tok) {
         try {
             if (tok.size()>2 && tok[0]=='0' && (tok[1]=='x' || tok[1]=='X')) return stoi(tok,nullptr,16);
@@ -121,7 +131,6 @@ struct CPU {
         } catch(...) { throw runtime_error("invalid integer: "+tok); }
     }
 
-    // get address from token; allow [number] or [r8N] or [r16N]
     u32 resolve_address(const string &memtok) {
         if (!is_mem(memtok)) throw runtime_error("not memory token: "+memtok);
         string inside = memtok.substr(1, memtok.size()-2);
@@ -141,7 +150,6 @@ struct CPU {
         }
     }
 
-    // read/write memory helpers:
     u8 mem_read8_at(u32 addr) {
         if (addr >= mem_size) throw runtime_error("memory read8 out of bounds");
         return mem[addr];
@@ -163,19 +171,31 @@ struct CPU {
 
     // Execution entrypoint
     void run() {
-        size_t pc = 0;
-        while (pc < program.size()) {
-            string line = program[pc++];
-            line = trim(line);
-            if (line.empty() || line[0]=='#') continue;
-            auto toks = split_tok(line);
-            if (toks.empty()) continue;
-            string op = toks[0];
-            // QUIT
-            if (op=="QUIT" || op=="EXIT") {
-                cout << "Program exited via QUIT.\n";
-                return;
-            }
+    preprocess_labels();
+    size_t pc = 0;
+    while (pc < program.size()) {
+        string line = trim(program[pc]);
+
+        if (line.empty() || line[0] == '#' || line.back() == ':') {
+            pc++;
+            continue;
+        }
+
+        auto toks = split_tok(line);
+        if (toks.empty()) {
+            pc++;
+            continue;
+        }
+
+        string op = toks[0];
+
+        // QUIT / EXIT
+        if (op == "QUIT" || op == "EXIT") {
+            cout << "Program exited via QUIT.\n";
+            return;
+        }
+
+        pc++; 
 
             // Arithmetic ops formats: <FlagAdd> A B
             // Flag prefix: two letters: size(L/H), s/u (S/U). Example: LSADD, HUADD, etc.
@@ -191,15 +211,12 @@ struct CPU {
                 if (toks.size() < 3) throw runtime_error("not enough args for arithmetic");
                 string A = toks[1], B = toks[2];
                 if (size=='L') {
-                    // 8-bit ops; A and B are 8-bit values/regs/immediates.
-                    // resolve A -> value8
                     i32_t:;
                     int aval = 0;
                     if (is_r8(A)) aval = (int)regs8[stoi(A.substr(2))];
                     else if (is_number(A)) aval = parse_int(A) & 0xFF;
                     else if (is_mem(A)) { aval = mem_read8_at(resolve_address(A)); }
                     else throw runtime_error("unsupported A for 8-bit op: "+A);
-                    // B must be register r8N (we'll allow mem target optionally)
                     if (is_r8(B)) {
                         int bi = stoi(B.substr(2));
                         int bval = regs8[bi];
@@ -317,6 +334,86 @@ struct CPU {
                 continue;
             }
 
+            // Bitwise ops formats: <FlagOp> A B
+// Flag prefix: size (L/H), e.g., "LAND" = 8-bit AND, "HSHL" = 16-bit SHL
+if ((op.size() >= 3) && (op.find("AND") != string::npos || op.find("OR") != string::npos ||
+                          op.find("XOR") != string::npos || op.find("NOT") != string::npos ||
+                          op.find("SHL") != string::npos || op.find("SHR") != string::npos)) {
+    char size = op[0]; // 'L' or 'H'
+    string opcode;
+    if (op.find("AND") != string::npos) opcode = "AND";
+    else if (op.find("OR") != string::npos) opcode = "OR";
+    else if (op.find("XOR") != string::npos) opcode = "XOR";
+    else if (op.find("NOT") != string::npos) opcode = "NOT";
+    else if (op.find("SHL") != string::npos) opcode = "SHL";
+    else if (op.find("SHR") != string::npos) opcode = "SHR";
+
+    if (toks.size() < 2) throw runtime_error(op + " needs at least 1 argument");
+    string A = toks[1], B = (toks.size() >= 3 ? toks[2] : "");
+
+    if (size == 'L') {
+        int aval = is_r8(A) ? regs8[stoi(A.substr(2))] : parse_int(A) & 0xFF;
+        if (opcode != "NOT") {
+            if (is_r8(B)) {
+                int bi = stoi(B.substr(2));
+                int bval = regs8[bi];
+                if (opcode=="AND") regs8[bi] = (u8)(bval & aval);
+                else if (opcode=="OR") regs8[bi] = (u8)(bval | aval);
+                else if (opcode=="XOR") regs8[bi] = (u8)(bval ^ aval);
+                else if (opcode=="SHL") regs8[bi] = (u8)(bval << aval);
+                else if (opcode=="SHR") regs8[bi] = (u8)(bval >> aval);
+            } else if (is_mem(B)) {
+                u32 addr = resolve_address(B);
+                u8 bval = mem_read8_at(addr);
+                if (opcode=="AND") mem_write8_at(addr, (u8)(bval & aval));
+                else if (opcode=="OR") mem_write8_at(addr, (u8)(bval | aval));
+                else if (opcode=="XOR") mem_write8_at(addr, (u8)(bval ^ aval));
+                else if (opcode=="SHL") mem_write8_at(addr, (u8)(bval << aval));
+                else if (opcode=="SHR") mem_write8_at(addr, (u8)(bval >> aval));
+            } else throw runtime_error("B must be r8N or memory for L-bit bitwise op");
+        } else { // NOT only uses one operand
+            if (is_r8(A)) {
+                int ai = stoi(A.substr(2));
+                regs8[ai] = ~regs8[ai];
+            } else if (is_mem(A)) {
+                u32 addr = resolve_address(A);
+                mem_write8_at(addr, ~mem_read8_at(addr));
+            } else throw runtime_error("unsupported operand for L-bit NOT");
+        }
+    } else if (size == 'H') {
+        int aval = is_r16(A) ? regs16[stoi(A.substr(3))] : parse_int(A) & 0xFFFF;
+        if (opcode != "NOT") {
+            if (is_r16(B)) {
+                int bi = stoi(B.substr(3));
+                int bval = regs16[bi];
+                if (opcode=="AND") regs16[bi] = (u16)(bval & aval);
+                else if (opcode=="OR") regs16[bi] = (u16)(bval | aval);
+                else if (opcode=="XOR") regs16[bi] = (u16)(bval ^ aval);
+                else if (opcode=="SHL") regs16[bi] = (u16)(bval << aval);
+                else if (opcode=="SHR") regs16[bi] = (u16)(bval >> aval);
+            } else if (is_mem(B)) {
+                u32 addr = resolve_address(B);
+                u16 bval = mem_read16_at(addr);
+                if (opcode=="AND") mem_write16_at(addr, (u16)(bval & aval));
+                else if (opcode=="OR") mem_write16_at(addr, (u16)(bval | aval));
+                else if (opcode=="XOR") mem_write16_at(addr, (u16)(bval ^ aval));
+                else if (opcode=="SHL") mem_write16_at(addr, (u16)(bval << aval));
+                else if (opcode=="SHR") mem_write16_at(addr, (u16)(bval >> aval));
+            } else throw runtime_error("B must be r16N or memory for H-bit bitwise op");
+        } else { // NOT only
+            if (is_r16(A)) {
+                int ai = stoi(A.substr(3));
+                regs16[ai] = ~regs16[ai];
+            } else if (is_mem(A)) {
+                u32 addr = resolve_address(A);
+                mem_write16_at(addr, ~mem_read16_at(addr));
+            } else throw runtime_error("unsupported operand for H-bit NOT");
+        }
+    } else throw runtime_error("unknown size prefix in bitwise opcode: " + op);
+
+    continue;
+}
+
             // Memory and register ops:
             // LWSB A B -> write single byte A to address B (address token can be 8 or 16 bit depending on L/H)
             // HWSB A B -> write single byte A to 16-bit address B
@@ -379,7 +476,6 @@ struct CPU {
                 else if (is_number(A)) addr = parse_int(A);
                 else throw runtime_error("unsupported A for READ: "+A);
                 if (op=="LREAD") {
-                    // ensure in 8-bit ram region
                     if (addr < ram8_offset || addr >= ram8_offset + ram8_size) {
                         throw runtime_error("LREAD address must be within 8-bit RAM region");
                     }
@@ -393,7 +489,6 @@ struct CPU {
 
             // show registers / debug instruction:
             if (op=="DUMP") {
-                // DUMP REG / MEM etc. We'll show small debug
                 if (toks.size()==1 || toks[1]=="REGS") {
                     cout << "r8: ";
                     for (int i=0;i<8;i++) {
@@ -417,39 +512,131 @@ struct CPU {
                 continue;
             }
 
+            if (op == "LCMP" || op == "HCMP") {
+              if (toks.size() < 3) throw runtime_error("CMP needs 2 args");
+              string A = toks[1], B = toks[2];
+              int aval = 0, bval = 0;
+
+              if (op[0] == 'L') { // 8-bit
+              aval = is_r8(A) ? regs8[stoi(A.substr(2))] : parse_int(A) & 0xFF;
+              bval = is_r8(B) ? regs8[stoi(B.substr(2))] : mem_read8_at(resolve_address(B));
+        } else {
+              aval = is_r16(A) ? regs16[stoi(A.substr(3))] : parse_int(A) & 0xFFFF;
+              bval = is_r16(B) ? regs16[stoi(B.substr(3))] : mem_read16_at(resolve_address(B));
+          }
+        set_flags(aval, bval);
+      continue;
+  }
+
+if (op == "JMP") {
+    if (toks.size() < 2) throw runtime_error("JMP needs a label");
+    string lbl = toks[1];
+    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+    pc = labels[lbl] + 1;
+    continue;
+}
+
+if (op == "JE" || op == "JZ") {
+    if (toks.size() < 2) throw runtime_error("JE/JZ needs a label");
+    if (ZF) {
+        string lbl = toks[1];
+        if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+        pc = labels[lbl] + 1;
+    }
+    continue;
+}
+
+if (op == "JNE" || op == "JNZ") {
+    if (toks.size() < 2) throw runtime_error("JNE/JNZ needs a label");
+    if (!ZF) {
+        string lbl = toks[1];
+        if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+        pc = labels[lbl] + 1;
+    }
+    continue;
+}
+
+if (op == "JL") {
+    if (toks.size() < 2) throw runtime_error("JL needs a label");
+    if (SF) {
+        string lbl = toks[1];
+        if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+        pc = labels[lbl] + 1;
+    }
+    continue;
+}
+
+if (op == "JG") {
+    if (toks.size() < 2) throw runtime_error("JG needs a label");
+    if (!SF && !ZF) {
+        string lbl = toks[1];
+        if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+        pc = labels[lbl] + 1;
+    }
+    continue;
+}
             throw runtime_error("unknown instruction: " + op);
         }
     }
 };
 
-vector<string> sample_program() {
-    vector<string> p;
-    p.push_back("# Sample program: put immed into r8_0, put immed into r8_1, unsigned add r8_0 into r8_1");
-    p.push_back("LPUT 5 r80");      
-    p.push_back("LPUT 10 r81");     
-    p.push_back("LUADD r80 r81");   
-    p.push_back("LPUT 2 r82");
-    p.push_back("LSMUL r82 r81");   
-    p.push_back("DUMP REGS");
-    p.push_back("QUIT");
-    return p;
-}
-
-int main(int argc, char** argv) {
+int main() {
     try {
         CPU cpu(65536, 8192, 256);
-        auto prog = sample_program();
-        cpu.load_program_lines(prog); 
 
-        prog.insert(prog.end() - 2, "LWSB r81 [" + to_string(cpu.ram8_offset) + "]");
+        // Precompute RAM8 base address
+        int ram8_base = cpu.mem_size - cpu.ram8_size;
 
-        cpu.load_program_lines(prog); // reload updated program
+        // Program with proper arithmetic so r81 gets a non-zero value
+        vector<string> prog = {
+            "# Initialize registers",
+            "LPUT 5 r80",    // counter
+            "LPUT 0 r81",    // accumulator
+            "LPUT 1 r82",    // subtractor
+            "LPUT 15 r83",   // not used in this example
+
+            "# Loop: sum numbers from 5 down to 1",
+            "loop_start:",
+            "LCMP 0 r80",
+            "JE loop_end",
+            "LUADD r80 r81",   // r81 = r81 + r80
+            "LUSUB r82 r80",   // r80 = r80 - r82
+            "LPUT 1 r82",      // reset r82 to 1
+            "JMP loop_start",
+            "loop_end:",
+
+            "# Bitwise tests",
+            "LAND r80 r81",
+            "LOR r80 r81",
+            "LXOR r80 r81",
+            "LNOT r81",
+            "LSHL r82 r81",
+            "LSHR r82 r81",
+
+            "DUMP REGS",
+            "DUMP MEM 0 16",
+
+            "# Write r81 to 8-bit RAM",
+            "LWSB r81 [" + std::to_string(ram8_base) + "]",
+            "QUIT"
+        };
+
+        cpu.load_program_lines(prog);
         cpu.run();
-    } catch (exception &ex) {
+
+        // Dump 8-bit RAM
+        std::cout << "Executing instruction: LWSB r81 [" << ram8_base << "]\n";
+        std::cout << "Dumping 8-bit RAM region:\n";
+        for (int i = 0; i < cpu.ram8_size; i++) {
+            if (i % 16 == 0) cout << hex << setw(4) << setfill('0') << (ram8_base + i) << ": ";
+            cout << hex << setw(2) << setfill('0') << (int)cpu.mem[ram8_base + i] << " ";
+            if (i % 16 == 15) cout << "\n";
+        }
+        cout << dec << "\n";
+
+    } catch (const std::exception &ex) {
         cerr << "Runtime error: " << ex.what() << "\n";
         return 2;
     }
     return 0;
 }
-
-
