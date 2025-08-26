@@ -9,6 +9,6 @@ git status
 
 git commit -m "%MSG%"
 
-git push origin main
+git push origin master
 
 pause
