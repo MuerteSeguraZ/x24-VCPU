@@ -1,18 +1,19 @@
 @echo off
+REM Ensure we're on the main branch (create if it doesn't exist)
+git branch | findstr /r "^* main" >nul
+if %errorlevel% neq 0 git checkout -b main
 
-git checkout master
-
+REM Add all changes
 git add --all
 
-git remote set-url origin https://github.com/EditSIMS/x24-VCPU.git
+REM Commit with fixed message
+git commit -m "increment/decrement shortcuts and negation"
 
-set "MSG=%~1"
-if "%MSG%"=="" set "MSG=Added za bitwise operations"
+REM Set remote origin if not already set
+git remote | findstr origin >nul
+if %errorlevel% neq 0 git remote add origin https://github.com/MuerteSeguraZ/x24.git
 
-git status
-
-git commit -m "%MSG%"
-
-git push -u origin master
+REM Push to remote main
+git push -u origin main
 
 pause
