@@ -34,9 +34,12 @@ struct CPU {
     // registers
     array<u8, 32> regs8{};
     array<u16, 32> regs16{};
+    u32 SP = 0; 
     // memory (external)
     vector<u8> mem;
     size_t mem_size = 65536;
+    size_t stack_base = 0; // base address of the stack
+    size_t stack_size = 1024; // configurable stack size
 
     void set_flags(int a, int b) {
     int res = b - a;
@@ -69,16 +72,30 @@ struct CPU {
     // program (text lines)
     vector<string> program;
 
-    CPU(size_t full_mem = 65536, size_t ram16_sz = 4096, size_t ram8_sz = 256) {
-        if (full_mem < ram8_sz + 1) throw runtime_error("memory too small");
-        mem_size = full_mem;
-        mem.assign(mem_size, 0);
-        ram8_size = min<size_t>(ram8_sz, 256);
-        program_region = 0;
-        program_size = 0;
-        ram16_offset = 0; // will set after loading program
-        ram16_size = ram16_sz;
-    }
+CPU(size_t full_mem = 65536, size_t ram16_sz = 4096, size_t ram8_sz = 256) {
+    if (full_mem < ram8_sz + 1) throw runtime_error("memory too small");
+    mem_size = full_mem;
+    mem.assign(mem_size, 0);
+
+    // 8-bit RAM
+    ram8_size = min<size_t>(ram8_sz, 256);
+    ram8_offset = mem_size - ram8_size;  // place at top of memory
+
+    // stack
+    stack_size = 1024;                    // default 1 KB stack
+    if (stack_size > ram8_offset)        // ensure it doesn't overlap 8-bit RAM
+        stack_size = ram8_offset;
+
+    stack_base = ram8_offset - stack_size; // stack sits just below 8-bit RAM
+    SP = stack_base + stack_size;          // SP points to top (stack grows down)
+
+    // program & 16-bit RAM
+    program_region = 0;
+    program_size = 0;
+    ram16_offset = 0;                     // will set after loading program
+    ram16_size = ram16_sz;
+}
+
 
     void load_program_lines(const vector<string>& lines) {
         program = lines;
@@ -624,6 +641,48 @@ if (op == "JG") {
     }
     continue;
 }
+
+// PUSH A -> push 8-bit or 16-bit value onto stack
+if (op == "PUSH") {
+    if (toks.size() < 2) throw runtime_error("PUSH needs 1 argument");
+    string A = toks[1];
+    int val = 0;
+    bool is16 = false;
+
+    if (is_r8(A)) val = regs8[stoi(A.substr(2))];
+    else if (is_r16(A)) { val = regs16[stoi(A.substr(3))]; is16 = true; }
+    else if (is_number(A)) val = parse_int(A);
+    else throw runtime_error("unsupported PUSH operand: " + A);
+
+    if (is16) {
+        if (SP < stack_base + 2) throw runtime_error("stack overflow");
+        SP -= 2;
+        mem_write16_at(SP, (u16)val);
+    } else {
+        if (SP < stack_base + 1) throw runtime_error("stack overflow");
+        SP -= 1;
+        mem_write8_at(SP, (u8)val);
+    }
+    continue;
+}
+
+// POP B -> pop value from stack into register
+if (op == "POP") {
+    if (toks.size() < 2) throw runtime_error("POP needs 1 argument");
+    string B = toks[1];
+
+    if (is_r8(B)) {
+        if (SP >= stack_base + stack_size) throw runtime_error("stack underflow");
+        regs8[stoi(B.substr(2))] = mem_read8_at(SP);
+        SP += 1;
+    } else if (is_r16(B)) {
+        if (SP + 1 >= stack_base + stack_size) throw runtime_error("stack underflow");
+        regs16[stoi(B.substr(3))] = mem_read16_at(SP);
+        SP += 2;
+    } else throw runtime_error("unsupported POP target: " + B);
+
+    continue;
+}
             throw runtime_error("unknown instruction: " + op);
         }
     }
@@ -676,7 +735,6 @@ int main() {
     "NEG [" + std::to_string(ram8_base) + "]",       // negate 8-bit RAM at ram8_base
     "NEG [" + std::to_string(ram8_base + 1) + "]"  ,  // negate 8-bit RAM at ram8_base + 1
 
-
     "DUMP REGS",
     "DUMP MEM 0 16",
 
@@ -684,6 +742,12 @@ int main() {
     "LWSB r81 [" + std::to_string(ram8_base) + "]",
     "INC [" + std::to_string(ram8_base) + "]",
     "DEC [" + std::to_string(ram8_base + 1) + "]",
+
+    "# omg new stuff noway",
+    "LPUT 10 r80",
+    "PUSH r80",
+    "LPUT 0 r81",
+    "POP r81",
     "QUIT"
 };
         cpu.load_program_lines(prog);

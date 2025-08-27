@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=increment/decrement shortcuts and negation"
+if "%MSG%"=="" set "MSG=added PUSH and POP."
 
 git status
 

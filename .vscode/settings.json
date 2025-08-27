@@ -2,6 +2,23 @@
   "C_Cpp.errorSquiggles": "disabled",
   "files.associations": {
     "vector": "cpp",
-    "exception": "cpp"
+    "exception": "cpp",
+    "initializer_list": "cpp",
+    "utility": "cpp",
+    "xutility": "cpp",
+    "compare": "cpp",
+    "concepts": "cpp",
+    "cstddef": "cpp",
+    "cstdint": "cpp",
+    "cstdio": "cpp",
+    "cstdlib": "cpp",
+    "cstring": "cpp",
+    "cwchar": "cpp",
+    "limits": "cpp",
+    "new": "cpp",
+    "tuple": "cpp",
+    "type_traits": "cpp",
+    "xmemory": "cpp",
+    "xtr1common": "cpp"
   }
 }
