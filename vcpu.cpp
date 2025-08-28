@@ -1,4 +1,5 @@
 #include <bits/stdc++.h>
+#include "vcfs.c"
 using namespace std;
 unordered_map<string, size_t> labels;
 
@@ -594,6 +595,39 @@ if (op == "NEG") {
     continue;
 }
 
+if (op == "DREAD") {
+    if (toks.size() < 3) throw runtime_error("DREAD needs 2 arguments: sector and r8 target");
+    u16 sector = stoi(toks[1]);
+    u8 r = stoi(toks[2].substr(2));
+
+    // Open disk if not already open
+    if (!disk_fp && OPEN_DISK(DISK_FILE) != 0)
+        throw runtime_error("DREAD failed: cannot open disk");
+
+    uint8_t buf[512];
+    if (READ_DISK(sector, buf) != 0)
+        throw runtime_error("DREAD failed");
+
+    regs8[r] = buf[0];
+    continue;
+}
+
+if (op == "DWRITE") {
+    if (toks.size() < 3) throw runtime_error("DWRITE needs 2 arguments: sector and r8 source");
+    u16 sector = stoi(toks[1]);
+    u8 r = stoi(toks[2].substr(2));
+
+    // Open disk if not already open
+    if (!disk_fp && OPEN_DISK(DISK_FILE) != 0)
+        throw runtime_error("DWRITE failed: cannot open disk");
+
+    uint8_t buf[512] = {0};
+    buf[0] = regs8[r];
+    if (WRITE_DISK(sector, buf) != 0)
+        throw runtime_error("DWRITE failed");
+    continue;
+}
+
 if (op == "JMP") {
     if (toks.size() < 2) throw runtime_error("JMP needs a label");
     string lbl = toks[1];
@@ -639,6 +673,33 @@ if (op == "JG") {
         if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
         pc = labels[lbl] + 1;
     }
+    continue;
+}
+
+if (op == "PRINT") {
+    if (toks.size() < 2) throw runtime_error("PRINT needs 1 argument");
+
+    string arg = toks[1];
+
+    if (is_r8(arg)) {
+        int idx = stoi(arg.substr(2));
+        cout << arg << " = " << (int)regs8[idx] << "\n";
+    } 
+    else if (is_r16(arg)) {
+        int idx = stoi(arg.substr(3));
+        cout << arg << " = " << regs16[idx] << "\n";
+    } 
+    else if (arg.front() == '[' && arg.back() == ']') {
+        u32 addr = resolve_address(arg);
+        cout << arg << " = " << (int)mem_read8_at(addr) << "\n";
+    } 
+    else if (is_number(arg)) {
+        cout << arg << " = " << parse_int(arg) << "\n";
+    } 
+    else {
+        throw runtime_error("unsupported PRINT argument: " + arg);
+    }
+
     continue;
 }
 
@@ -697,57 +758,13 @@ int main() {
 
         // Program with proper arithmetic so r81 gets a non-zero value
         vector<string> prog = {
-    "# Initialize registers",
-    "LPUT 5 r80",    // counter
-    "LPUT 0 r81",    // accumulator
-    "LPUT 1 r82",    // subtractor
-    "LPUT 15 r83",   // not used in this example
-
-    "# Loop: sum numbers from 5 down to 1",
-    "loop_start:",
-    "LCMP 0 r80",
-    "JE loop_end",
-    "LUADD r80 r81",   // r81 = r81 + r80
-    "LUSUB r82 r80",   // r80 = r80 - r82
-    "LPUT 1 r82",      // reset r82 to 1
-    "JMP loop_start",
-    "loop_end:",
-
-    "# Bitwise tests",
-    "LAND r80 r81",
-    "LOR r80 r81",
-    "LXOR r80 r81",
-    "LNOT r81",
-    "LSHL r82 r81",
-    "LSHR r82 r81",
-
-    "# Increment / Decrement tests",
-    "INC r80",      // increment r80 by 1
-    "DEC r81",      // decrement r81 by 1
-    "INC r82",      // increment r82 by 1
-    "DEC r83",      // decrement r83 by 1
-
-    "# Negation tests",
-    "NEG r80",            // r80 = -r80 (wraps around in u8)
-    "NEG r81",            // r81 = -r81
-    "NEG r82",            // r82 = -r82
-    "NEG r83",            // r83 = -r83
-    "NEG [" + std::to_string(ram8_base) + "]",       // negate 8-bit RAM at ram8_base
-    "NEG [" + std::to_string(ram8_base + 1) + "]"  ,  // negate 8-bit RAM at ram8_base + 1
-
-    "DUMP REGS",
-    "DUMP MEM 0 16",
-
-    "# Write r81 to 8-bit RAM",
-    "LWSB r81 [" + std::to_string(ram8_base) + "]",
-    "INC [" + std::to_string(ram8_base) + "]",
-    "DEC [" + std::to_string(ram8_base + 1) + "]",
-
-    "# omg new stuff noway",
-    "LPUT 10 r80",
-    "PUSH r80",
-    "LPUT 0 r81",
-    "POP r81",
+    "DREAD 2 r80",
+    "PRINT r80",
+    "DWRITE 3 r80",
+    "PRINT r80",
+    "DREAD 3 r81",
+    "PRINT r81",
+    "LWSB r81 [65280]",
     "QUIT"
 };
         cpu.load_program_lines(prog);

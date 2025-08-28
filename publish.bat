@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=added PUSH and POP."
+if "%MSG%"=="" set "MSG=disk stuff lel"
 
 git status
 
