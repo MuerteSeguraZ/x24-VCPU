@@ -1481,6 +1481,145 @@ struct CPU {
                 continue;
             }
 
+            // IBTS - Insert Bit String (80386 early stepping only)
+            // Syntax: IBTS base bit_offset source bit_count
+            // Extracts bits from source register and inserts them into base
+            // Starting at bit_offset for bit_count bits
+            if (op == "IBTS") {
+                if (toks.size() < 5) throw runtime_error("IBTS needs 4 arguments: base bit_offset source bit_count");
+                
+                string base = toks[1];
+                string offset_str = toks[2];
+                string source = toks[3];
+                string count_str = toks[4];
+                
+                // Parse bit offset
+                int bit_offset = 0;
+                if (is_r8(offset_str)) bit_offset = regs8[get_r8_index(offset_str)];
+                else if (is_number(offset_str)) bit_offset = parse_int(offset_str);
+                else throw runtime_error("IBTS bit_offset must be register or immediate");
+                
+                // Parse bit count
+                int bit_count = 0;
+                if (is_r8(count_str)) bit_count = regs8[get_r8_index(count_str)];
+                else if (is_number(count_str)) bit_count = parse_int(count_str);
+                else throw runtime_error("IBTS bit_count must be register or immediate");
+                
+                // Clamp bit_count
+                if (bit_count <= 0) continue;
+                if (bit_count > 32) bit_count = 32;
+                
+                // Get source bits (from register)
+                u32 source_bits = 0;
+                if (is_r8(source)) source_bits = regs8[get_r8_index(source)];
+                else if (is_r16(source)) source_bits = regs16[get_r16_index(source)];
+                else throw runtime_error("IBTS source must be register");
+                
+                // Create mask for extraction
+                u32 mask = (1U << bit_count) - 1;
+                source_bits &= mask;
+                
+                // Insert into base operand
+                if (is_r8(base)) {
+                    int idx = get_r8_index(base);
+                    bit_offset = bit_offset % 8;
+                    if (bit_offset + bit_count > 8) bit_count = 8 - bit_offset;
+                    
+                    u8 dest = regs8[idx];
+                    u8 insert_mask = ((1U << bit_count) - 1) << bit_offset;
+                    dest = (dest & ~insert_mask) | ((source_bits << bit_offset) & insert_mask);
+                    regs8[idx] = dest;
+                    
+                } else if (is_r16(base)) {
+                    int idx = get_r16_index(base);
+                    bit_offset = bit_offset % 16;
+                    if (bit_offset + bit_count > 16) bit_count = 16 - bit_offset;
+                    
+                    u16 dest = regs16[idx];
+                    u16 insert_mask = ((1U << bit_count) - 1) << bit_offset;
+                    dest = (dest & ~insert_mask) | ((source_bits << bit_offset) & insert_mask);
+                    regs16[idx] = dest;
+                    
+                } else if (is_mem(base)) {
+                    u32 addr = resolve_address(base);
+                    bit_offset = bit_offset % 8;
+                    if (bit_offset + bit_count > 8) bit_count = 8 - bit_offset;
+                    
+                    u8 dest = mem_read8_at(addr);
+                    u8 insert_mask = ((1U << bit_count) - 1) << bit_offset;
+                    dest = (dest & ~insert_mask) | ((source_bits << bit_offset) & insert_mask);
+                    mem_write8_at(addr, dest);
+                    
+                } else {
+                    throw runtime_error("IBTS base must be register or memory");
+                }
+                
+                continue;
+            }
+
+            // XBTS - Extract Bit String (80386 early stepping only)
+            // Syntax: XBTS source bit_offset dest bit_count
+            // Extracts bit_count bits from source starting at bit_offset
+            // Stores result in dest register (zero-extended)
+            if (op == "XBTS") {
+                if (toks.size() < 5) throw runtime_error("XBTS needs 4 arguments: source bit_offset dest bit_count");
+                
+                string source = toks[1];
+                string offset_str = toks[2];
+                string dest = toks[3];
+                string count_str = toks[4];
+                
+                // Parse bit offset
+                int bit_offset = 0;
+                if (is_r8(offset_str)) bit_offset = regs8[get_r8_index(offset_str)];
+                else if (is_number(offset_str)) bit_offset = parse_int(offset_str);
+                else throw runtime_error("XBTS bit_offset must be register or immediate");
+                
+                // Parse bit count
+                int bit_count = 0;
+                if (is_r8(count_str)) bit_count = regs8[get_r8_index(count_str)];
+                else if (is_number(count_str)) bit_count = parse_int(count_str);
+                else throw runtime_error("XBTS bit_count must be register or immediate");
+                
+                // Clamp bit_count
+                if (bit_count <= 0) continue;
+                if (bit_count > 32) bit_count = 32;
+                
+                // Extract from source
+                u32 extracted = 0;
+                
+                if (is_r8(source)) {
+                    bit_offset = bit_offset % 8;
+                    if (bit_offset + bit_count > 8) bit_count = 8 - bit_offset;
+                    extracted = (regs8[get_r8_index(source)] >> bit_offset) & ((1U << bit_count) - 1);
+                    
+                } else if (is_r16(source)) {
+                    bit_offset = bit_offset % 16;
+                    if (bit_offset + bit_count > 16) bit_count = 16 - bit_offset;
+                    extracted = (regs16[get_r16_index(source)] >> bit_offset) & ((1U << bit_count) - 1);
+                    
+                } else if (is_mem(source)) {
+                    u32 addr = resolve_address(source);
+                    bit_offset = bit_offset % 8;
+                    if (bit_offset + bit_count > 8) bit_count = 8 - bit_offset;
+                    extracted = (mem_read8_at(addr) >> bit_offset) & ((1U << bit_count) - 1);
+                    
+                } else {
+                    throw runtime_error("XBTS source must be register or memory");
+                }
+                
+                // Store in destination register
+                if (is_r8(dest)) {
+                    regs8[get_r8_index(dest)] = (u8)extracted;
+                } else if (is_r16(dest)) {
+                    regs16[get_r16_index(dest)] = (u16)extracted;
+                } else {
+                    throw runtime_error("XBTS destination must be register");
+                }
+                
+                continue;
+            }
+
             if (op == "CALL") {
                 if (toks.size() < 2) throw runtime_error("CALL needs label");
                 string label = toks[1];

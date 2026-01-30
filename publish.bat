@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=MASSIVE upgrade chat like actually mssive like maybe `15 instructions or smth"
+if "%MSG%"=="" set "MSG=more bit stuff"
 
 git status
 
