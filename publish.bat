@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=more bit stuff"
+if "%MSG%"=="" set "MSG=more unary stuff"
 
 git status
 

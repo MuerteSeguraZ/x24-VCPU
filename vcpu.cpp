@@ -603,6 +603,236 @@ struct CPU {
                 continue;
             }
 
+            // ABS - Absolute Value
+            // Syntax: ABS operand
+            // Makes value positive (removes sign)
+            if (op == "ABS") {
+                if (toks.size() < 2) throw runtime_error("ABS needs 1 argument");
+                string A = toks[1];
+
+                if (is_r8(A)) {
+                    int idx = get_r8_index(A);
+                    i8 val = (i8)regs8[idx];
+                    regs8[idx] = (u8)(val < 0 ? -val : val);
+                } else if (is_r16(A)) {
+                    int idx = get_r16_index(A);
+                    i16 val = (i16)regs16[idx];
+                    regs16[idx] = (u16)(val < 0 ? -val : val);
+                } else if (is_mem(A)) {
+                    u32 addr = resolve_address(A);
+                    i8 val = (i8)mem_read8_at(addr);
+                    mem_write8_at(addr, (u8)(val < 0 ? -val : val));
+                } else throw runtime_error("ABS operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // CLR - Clear (set to zero)
+            // Syntax: CLR operand
+            // More efficient/readable than MOV 0 operand
+            if (op == "CLR") {
+                if (toks.size() < 2) throw runtime_error("CLR needs 1 argument");
+                string A = toks[1];
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = 0;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = 0;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), 0);
+                } else throw runtime_error("CLR operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETZ - Set if Zero
+            // Syntax: SETZ operand
+            // Sets operand to 1 if ZF=1, else 0
+            if (op == "SETZ" || op == "SETE") {
+                if (toks.size() < 2) throw runtime_error("SETZ needs 1 argument");
+                string A = toks[1];
+                u8 val = ZF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETZ operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETNZ - Set if Not Zero
+            // Syntax: SETNZ operand
+            // Sets operand to 1 if ZF=0, else 0
+            if (op == "SETNZ" || op == "SETNE") {
+                if (toks.size() < 2) throw runtime_error("SETNZ needs 1 argument");
+                string A = toks[1];
+                u8 val = !ZF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETNZ operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETC - Set if Carry
+            // Syntax: SETC operand
+            // Sets operand to 1 if CF=1, else 0
+            if (op == "SETC") {
+                if (toks.size() < 2) throw runtime_error("SETC needs 1 argument");
+                string A = toks[1];
+                u8 val = CF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETC operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETNC - Set if Not Carry
+            // Syntax: SETNC operand
+            // Sets operand to 1 if CF=0, else 0
+            if (op == "SETNC") {
+                if (toks.size() < 2) throw runtime_error("SETNC needs 1 argument");
+                string A = toks[1];
+                u8 val = !CF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETNC operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETS - Set if Sign (negative)
+            // Syntax: SETS operand
+            // Sets operand to 1 if SF=1, else 0
+            if (op == "SETS") {
+                if (toks.size() < 2) throw runtime_error("SETS needs 1 argument");
+                string A = toks[1];
+                u8 val = SF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETS operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETNS - Set if Not Sign (positive)
+            // Syntax: SETNS operand
+            // Sets operand to 1 if SF=0, else 0
+            if (op == "SETNS") {
+                if (toks.size() < 2) throw runtime_error("SETNS needs 1 argument");
+                string A = toks[1];
+                u8 val = !SF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETNS operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETL - Set if Less (SF=1)
+            // Syntax: SETL operand
+            // Sets operand to 1 if last comparison was less than
+            if (op == "SETL") {
+                if (toks.size() < 2) throw runtime_error("SETL needs 1 argument");
+                string A = toks[1];
+                u8 val = SF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETL operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETG - Set if Greater (SF=0 and ZF=0)
+            // Syntax: SETG operand
+            // Sets operand to 1 if last comparison was greater than
+            if (op == "SETG") {
+                if (toks.size() < 2) throw runtime_error("SETG needs 1 argument");
+                string A = toks[1];
+                u8 val = (!SF && !ZF) ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETG operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETLE - Set if Less or Equal (SF=1 or ZF=1)
+            // Syntax: SETLE operand
+            if (op == "SETLE") {
+                if (toks.size() < 2) throw runtime_error("SETLE needs 1 argument");
+                string A = toks[1];
+                u8 val = (SF || ZF) ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETLE operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
+            // SETGE - Set if Greater or Equal (SF=0)
+            // Syntax: SETGE operand
+            if (op == "SETGE") {
+                if (toks.size() < 2) throw runtime_error("SETGE needs 1 argument");
+                string A = toks[1];
+                u8 val = !SF ? 1 : 0;
+
+                if (is_r8(A)) {
+                    regs8[get_r8_index(A)] = val;
+                } else if (is_r16(A)) {
+                    regs16[get_r16_index(A)] = val;
+                } else if (is_mem(A)) {
+                    mem_write8_at(resolve_address(A), val);
+                } else throw runtime_error("SETGE operand must be r8N, r16N, or [addr]");
+
+                continue;
+            }
+
             // ROL - Rotate Left
             if (op == "ROL") {
                 if (toks.size() < 3) throw runtime_error("ROL needs 2 arguments");
