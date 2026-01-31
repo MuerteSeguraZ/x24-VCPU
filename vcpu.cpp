@@ -61,6 +61,8 @@ struct CPU {
     array<u16, 32> regs16{};
     array<float, 32> regs_f32{};
     array<double, 32> regs_f64{};
+    array<u32, 256> interrupt_vector_table{};
+    queue<u8> pending_interrupts;
     u32 SP = 0; 
     
     // memory
@@ -79,6 +81,8 @@ struct CPU {
     bool FE = false;
     bool FG = false;
     bool FL = false;
+    bool interrupt_enabled = true;
+    bool trap_flag = false;
 
     // memory layout
     size_t program_region = 0;
@@ -141,6 +145,57 @@ struct CPU {
             }
         }
     }
+
+    void register_interrupt_handler(u8 interrupt_num, u32 handler_address) {
+        interrupt_vector_table[interrupt_num] = handler_address;
+    }
+
+    void trigger_interrupt(u8 interrupt_num) {
+    pending_interrupts.push(interrupt_num);
+}
+
+    void handle_interrupt(u8 interrupt_num, size_t& pc) {
+        if (!interrupt_enabled && interrupt_num < 32) {
+            // Non-maskable interrupts (0-31) can't be disabled
+            // For simplicity, we'll make interrupts 0-31 non-maskable
+        } else if (!interrupt_enabled) {
+            return;  // Interrupts disabled
+        }
+    
+        // Get handler address from IVT
+        u32 handler_addr = interrupt_vector_table[interrupt_num];
+    
+        if (handler_addr == 0) {
+            cout << "WARNING: No handler for interrupt " << (int)interrupt_num << "\n";
+            return;
+        }   
+    
+        // Push flags (simplified - just store key flags)
+        u16 flags = 0;
+        flags |= (ZF ? (1 << 0) : 0);
+        flags |= (SF ? (1 << 1) : 0);
+        flags |= (CF ? (1 << 2) : 0);
+        flags |= (OF ? (1 << 3) : 0);
+        flags |= (interrupt_enabled ? (1 << 4) : 0);
+        flags |= (trap_flag ? (1 << 5) : 0);
+        
+        if (SP < stack_base + 4) throw runtime_error("stack overflow during interrupt");
+        
+        // Push return address and flags (like x86)
+        SP -= 2;
+        mem_write16_at(SP, (u16)pc);  // Return address
+        SP -= 2;
+        mem_write16_at(SP, flags);    // Flags
+        
+        // Disable interrupts during handler (can be re-enabled with STI)
+        interrupt_enabled = false;
+        
+        // Jump to handler
+        if (handler_addr >= program.size()) {
+            throw runtime_error("interrupt handler address out of bounds");
+        }
+        pc = handler_addr;
+    }   
 
     CPU(size_t full_mem = 65536, size_t ram16_sz = 4096, size_t ram8_sz = 256) {
         if (full_mem < ram8_sz + 1) throw runtime_error("memory too small");
@@ -385,8 +440,108 @@ struct CPU {
 
             pc++; 
 
+            if (interrupt_enabled && !pending_interrupts.empty()) {
+                u8 int_num = pending_interrupts.front();
+                pending_interrupts.pop();
+                handle_interrupt(int_num, pc);
+            }
+
             if (op == "NOP") {
                 // Literally do nothing
+                continue;
+            }
+
+            if (op == "STI") {
+                interrupt_enabled = true;
+                continue;
+            }
+
+            if (op == "CLI") {
+                interrupt_enabled = false;
+                continue;
+            }
+
+            if (op == "INT") {
+                if (toks.size() < 2) throw runtime_error("INT needs 1 argument (interrupt number)");
+                string int_str = toks[1];
+    
+                u8 int_num = 0;
+                if (is_r8(int_str)) int_num = regs8[get_r8_index(int_str)];
+                else if (is_number(int_str)) int_num = (u8)parse_int(int_str);
+                else throw runtime_error("INT: interrupt number must be r8 or immediate");
+    
+                // Trigger interrupt immediately
+                handle_interrupt(int_num, pc);
+                continue;
+            }
+
+            if (op == "IRET") {
+                if (SP > stack_base + stack_size - 4) throw runtime_error("stack underflow during IRET");
+    
+                // Pop flags
+                u16 flags = mem_read16_at(SP);
+                SP += 2;
+    
+                // Restore flags
+                ZF = (flags & (1 << 0)) != 0;
+                SF = (flags & (1 << 1)) != 0;
+                CF = (flags & (1 << 2)) != 0;
+                OF = (flags & (1 << 3)) != 0;
+                interrupt_enabled = (flags & (1 << 4)) != 0;
+                trap_flag = (flags & (1 << 5)) != 0;
+                
+                // Pop return address
+                u16 ret_addr = mem_read16_at(SP);
+                SP += 2;
+                
+                pc = ret_addr;
+                continue;
+            }
+
+            if (op == "HLT") {
+                // Real HLT: Stop execution until an interrupt occurs
+                // Process any pending interrupt to wake from halt
+                if (!pending_interrupts.empty()) {
+                    u8 int_num = pending_interrupts.front();
+                    pending_interrupts.pop();
+                    handle_interrupt(int_num, pc);
+                } else {
+                    // No interrupts - CPU stays halted (program ends)
+                    cout << "CPU halted. No interrupts available.\n";
+                    return;
+                }
+                continue;
+            }
+
+            if (op == "SETVEC") {
+                if (toks.size() < 3) throw runtime_error("SETVEC needs 2 arguments: interrupt_number handler_address");
+                string int_str = toks[1], addr_str = toks[2];
+    
+                u8 int_num = 0;
+                if (is_r8(int_str)) int_num = regs8[get_r8_index(int_str)];
+                else if (is_number(int_str)) int_num = (u8)parse_int(int_str);
+                else throw runtime_error("SETVEC: interrupt number must be r8 or immediate");
+                
+                u32 handler_addr = 0;
+                if (is_r16(addr_str)) handler_addr = regs16[get_r16_index(addr_str)];
+                else if (is_number(addr_str)) handler_addr = parse_int(addr_str);
+                else if (labels.count(addr_str)) handler_addr = labels[addr_str];
+                else throw runtime_error("SETVEC: handler address must be r16, immediate, or label");
+    
+                register_interrupt_handler(int_num, handler_addr);
+                continue;
+            }
+
+            if (op == "TRIGGER") {
+                if (toks.size() < 2) throw runtime_error("TRIGGER needs 1 argument");
+                string int_str = toks[1];
+    
+                u8 int_num = 0;
+                if (is_r8(int_str)) int_num = regs8[get_r8_index(int_str)];
+                else if (is_number(int_str)) int_num = (u8)parse_int(int_str);
+                else throw runtime_error("TRIGGER: interrupt number must be r8 or immediate");
+    
+                trigger_interrupt(int_num);
                 continue;
             }
 

@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=fix mov to handle 16-bit values and added STORE and HSTORE"
+if "%MSG%"=="" set "MSG=minimal interrupt system will better it"
 
 git status
 
