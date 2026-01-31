@@ -9,6 +9,8 @@ using u16 = uint16_t;
 using i8  = int8_t;
 using i16 = int16_t;
 using u32 = uint32_t;
+using i32 = int32_t;  // ADD THIS
+using u64 = uint64_t;  // ADD THIS
 
 static string trim(const string &s) {
     size_t a = s.find_first_not_of(" \t\r\n");
@@ -57,6 +59,8 @@ struct CPU {
     // registers
     array<u8, 32> regs8{};
     array<u16, 32> regs16{};
+    array<float, 32> regs_f32{};
+    array<double, 32> regs_f64{};
     u32 SP = 0; 
     
     // memory
@@ -70,6 +74,11 @@ struct CPU {
     bool SF = false;  // Sign Flag
     bool CF = false;  // Carry Flag
     bool OF = false;  // Overflow Flag
+    bool FZ = false;
+    bool FN = false;
+    bool FE = false;
+    bool FG = false;
+    bool FL = false;
 
     // memory layout
     size_t program_region = 0;
@@ -198,6 +207,78 @@ struct CPU {
         return false;
     }
 
+    bool is_f32(const string &s) {
+        if (s.size() < 4) return false;
+        if (s.rfind("f32", 0) == 0) {
+            string num;
+            if (s.size() > 3 && s[3] == '_') num = s.substr(4);
+            else num = s.substr(3);
+            if (num.empty()) return false;
+            try { 
+                int n = stoi(num); 
+                return n >= 0 && n < 32; 
+            } catch(...) {}
+        }
+        return false;
+    }
+    
+    bool is_f64(const string &s) {
+        if (s.size() < 4) return false;
+        if (s.rfind("f64", 0) == 0) {
+            string num;
+            if (s.size() > 3 && s[3] == '_') num = s.substr(4);
+            else num = s.substr(3);
+            if (num.empty()) return false;
+            try { 
+                int n = stoi(num); 
+                return n >= 0 && n < 32; 
+            } catch(...) {}
+        }
+        return false;
+    }
+
+    int get_f32_index(const string &s) {
+        if (!is_f32(s)) throw runtime_error("not an f32 register: " + s);
+        if (s[3] == '_') return stoi(s.substr(4));
+        return stoi(s.substr(3));
+    }
+    
+    int get_f64_index(const string &s) {
+        if (!is_f64(s)) throw runtime_error("not an f64 register: " + s);
+        if (s[3] == '_') return stoi(s.substr(4));
+        return stoi(s.substr(3));
+    }
+    
+    bool is_float_literal(const string &s) {
+        if (s.empty()) return false;
+        try {
+            stof(s);
+            return s.find('.') != string::npos || s.find('e') != string::npos || s.find('E') != string::npos;
+        } catch(...) {}
+        return false;
+    }
+    
+    float parse_float(const string &s) {
+        try {
+            return stof(s);
+        } catch(...) {
+            throw runtime_error("invalid float: " + s);
+        }
+    }
+    
+    void set_float_flags(float result) {
+        FZ = (result == 0.0f);
+        FN = (result < 0.0f);
+    }
+    
+    void set_float_compare_flags(float a, float b) {
+        FE = (a == b);
+        FG = (a > b);
+        FL = (a < b);
+        FZ = FE;
+        FN = FL;
+    }
+
     bool is_mem(const string &s) {
         return s.size() >= 3 && s.front() == '[' && s.back() == ']';
     }
@@ -309,7 +390,778 @@ struct CPU {
                 continue;
             }
 
-// CMOVE/CMOVZ - Conditional Move if Equal/Zero (ZF=1)
+            // float-point instructions
+            if (op == "FMOV") {
+                if (toks.size() < 3) throw runtime_error("FMOV needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                float val = 0.0f;
+                
+                // Get source value
+                if (is_f32(src)) {
+                    val = regs_f32[get_f32_index(src)];
+                } else if (is_float_literal(src)) {
+                    val = parse_float(src);
+                } else if (is_mem(src)) {
+                    u32 addr = resolve_address(src);
+                    u32 bits = mem_read16_at(addr) | ((u32)mem_read16_at(addr + 2) << 16);
+                    memcpy(&val, &bits, sizeof(float));
+                } else {
+                    throw runtime_error("FMOV: unsupported source");
+                }
+                
+                // Write to destination
+                if (is_f32(dst)) {
+                    regs_f32[get_f32_index(dst)] = val;
+                } else if (is_mem(dst)) {
+                    u32 addr = resolve_address(dst);
+                    u32 bits;
+                    memcpy(&bits, &val, sizeof(float));
+                    mem_write16_at(addr, bits & 0xFFFF);
+                    mem_write16_at(addr + 2, (bits >> 16) & 0xFFFF);
+                } else {
+                    throw runtime_error("FMOV: unsupported destination");
+                }
+                continue;
+            }
+
+            // DMOV - Move 64-bit double
+            // Syntax: DMOV source destination
+            if (op == "DMOV") {
+                if (toks.size() < 3) throw runtime_error("DMOV needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                double val = 0.0;
+                
+                // Get source value
+                if (is_f64(src)) {
+                    val = regs_f64[get_f64_index(src)];
+                } else if (is_float_literal(src)) {
+                    val = stod(src);
+                } else if (is_mem(src)) {
+                    u32 addr = resolve_address(src);
+                    u64 bits = 0;
+                    bits = mem_read16_at(addr) | 
+                           ((u64)mem_read16_at(addr + 2) << 16) | 
+                           ((u64)mem_read16_at(addr + 4) << 32) | 
+                           ((u64)mem_read16_at(addr + 6) << 48);
+                    memcpy(&val, &bits, sizeof(double));
+                } else {
+                    throw runtime_error("DMOV: unsupported source");
+                }
+                
+                // Write to destination
+                if (is_f64(dst)) {
+                    regs_f64[get_f64_index(dst)] = val;
+                } else if (is_mem(dst)) {
+                    u32 addr = resolve_address(dst);
+                    u64 bits;
+                    memcpy(&bits, &val, sizeof(double));
+                    mem_write16_at(addr, bits & 0xFFFF);
+                    mem_write16_at(addr + 2, (bits >> 16) & 0xFFFF);
+                    mem_write16_at(addr + 4, (bits >> 32) & 0xFFFF);
+                    mem_write16_at(addr + 6, (bits >> 48) & 0xFFFF);
+                } else {
+                    throw runtime_error("DMOV: unsupported destination");
+                }
+                continue;
+            }
+
+            if (op == "FADD") {
+                if (toks.size() < 3) throw runtime_error("FADD needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f;
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FADD: first operand must be f32 or float literal");
+                
+                if (!is_f32(B)) throw runtime_error("FADD: second operand must be f32 register");
+                int bi = get_f32_index(B);
+                regs_f32[bi] += aval;
+                set_float_flags(regs_f32[bi]);
+                continue;
+            }
+
+            // DADD - Double Add
+            // Syntax: DADD operand1 operand2 (B = B + A)
+            if (op == "DADD") {
+                if (toks.size() < 3) throw runtime_error("DADD needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0;
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DADD: first operand must be f64 or float literal");
+                
+                if (!is_f64(B)) throw runtime_error("DADD: second operand must be f64 register");
+                int bi = get_f64_index(B);
+                regs_f64[bi] += aval;
+                continue;
+            }
+            
+            // FSUB - Float Subtract
+            // Syntax: FSUB operand1 operand2 (B = B - A)
+            if (op == "FSUB") {
+                if (toks.size() < 3) throw runtime_error("FSUB needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f;
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FSUB: first operand must be f32 or float literal");
+                
+                if (!is_f32(B)) throw runtime_error("FSUB: second operand must be f32 register");
+                int bi = get_f32_index(B);
+                regs_f32[bi] -= aval;
+                set_float_flags(regs_f32[bi]);
+                continue;
+            }
+
+            // DSUB - Double Subtract
+            // Syntax: DSUB operand1 operand2 (B = B - A)
+            if (op == "DSUB") {
+                if (toks.size() < 3) throw runtime_error("DSUB needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0;
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DSUB: first operand must be f64 or float literal");
+                
+                if (!is_f64(B)) throw runtime_error("DSUB: second operand must be f64 register");
+                int bi = get_f64_index(B);
+                regs_f64[bi] -= aval;
+                continue;
+            }
+            
+            // FMUL - Float Multiply
+            // Syntax: FMUL operand1 operand2
+            if (op == "FMUL") {
+                if (toks.size() < 3) throw runtime_error("FMUL needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f;
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FMUL: first operand must be f32 or float literal");
+                
+                if (!is_f32(B)) throw runtime_error("FMUL: second operand must be f32 register");
+                int bi = get_f32_index(B);
+                regs_f32[bi] *= aval;
+                set_float_flags(regs_f32[bi]);
+                continue;
+            }
+
+            // DMUL - Double Multiply
+            // Syntax: DMUL operand1 operand2 (B = B * A)
+            if (op == "DMUL") {
+                if (toks.size() < 3) throw runtime_error("DMUL needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0;
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DMUL: first operand must be f64 or float literal");
+                
+                if (!is_f64(B)) throw runtime_error("DMUL: second operand must be f64 register");
+                int bi = get_f64_index(B);
+                regs_f64[bi] *= aval;
+                continue;
+            }
+            
+            // FDIV - Float Divide
+            // Syntax: FDIV operand1 operand2 (B = B / A)
+            if (op == "FDIV") {
+                if (toks.size() < 3) throw runtime_error("FDIV needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f;
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FDIV: first operand must be f32 or float literal");
+                
+                if (aval == 0.0f) throw runtime_error("floating point division by zero");
+                
+                if (!is_f32(B)) throw runtime_error("FDIV: second operand must be f32 register");
+                int bi = get_f32_index(B);
+                regs_f32[bi] /= aval;
+                set_float_flags(regs_f32[bi]);
+                continue;
+            }
+
+            // DDIV - Double Divide
+            // Syntax: DDIV operand1 operand2 (B = B / A)
+            if (op == "DDIV") {
+                if (toks.size() < 3) throw runtime_error("DDIV needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0;
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DDIV: first operand must be f64 or float literal");
+                
+                if (aval == 0.0) {
+                    OF = true;
+                    cout << "WARNING: Double division by zero\n";
+                    continue;
+                }
+                
+                if (!is_f64(B)) throw runtime_error("DDIV: second operand must be f64 register");
+                int bi = get_f64_index(B);
+                regs_f64[bi] /= aval;
+                continue;
+            }
+            
+            // FCMP - Float Compare
+            // Syntax: FCMP operand1 operand2
+            if (op == "FCMP") {
+                if (toks.size() < 3) throw runtime_error("FCMP needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f, bval = 0.0f;
+                
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FCMP: first operand must be f32 or float literal");
+                
+                if (is_f32(B)) bval = regs_f32[get_f32_index(B)];
+                else if (is_float_literal(B)) bval = parse_float(B);
+                else throw runtime_error("FCMP: second operand must be f32 or float literal");
+                
+                set_float_compare_flags(aval, bval);
+                continue;
+            }
+
+            // DCMP - Double Compare
+            // Syntax: DCMP operand1 operand2
+            if (op == "DCMP") {
+                if (toks.size() < 3) throw runtime_error("DCMP needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0, bval = 0.0;
+                
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DCMP: first operand must be f64 or float literal");
+                
+                if (is_f64(B)) bval = regs_f64[get_f64_index(B)];
+                else if (is_float_literal(B)) bval = stod(B);
+                else throw runtime_error("DCMP: second operand must be f64 or float literal");
+                
+                FE = (aval == bval);
+                FG = (aval > bval);
+                FL = (aval < bval);
+                FZ = FE;
+                FN = FL;
+                continue;
+            }
+            
+            // FSQRT - Float Square Root
+            // Syntax: FSQRT operand
+            if (op == "FSQRT") {
+                if (toks.size() < 2) throw runtime_error("FSQRT needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FSQRT: operand must be f32 register");
+                int idx = get_f32_index(A);
+                
+                if (regs_f32[idx] < 0.0f) throw runtime_error("FSQRT: square root of negative number");
+                
+                regs_f32[idx] = sqrtf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DSQRT - Double Square Root
+            // Syntax: DSQRT operand
+            if (op == "DSQRT") {
+                if (toks.size() < 2) throw runtime_error("DSQRT needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DSQRT: operand must be f64 register");
+                int idx = get_f64_index(A);
+                
+                if (regs_f64[idx] < 0.0) throw runtime_error("DSQRT: square root of negative number");
+                
+                regs_f64[idx] = sqrt(regs_f64[idx]);
+                continue;
+            }
+            
+            // FABS - Float Absolute Value
+            // Syntax: FABS operand
+            if (op == "FABS") {
+                if (toks.size() < 2) throw runtime_error("FABS needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FABS: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = fabsf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DABS - Double Absolute Value
+            // Syntax: DABS operand
+            if (op == "DABS") {
+                if (toks.size() < 2) throw runtime_error("DABS needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DABS: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = fabs(regs_f64[idx]);
+                continue;
+            }
+            
+            // FNEG - Float Negate
+            // Syntax: FNEG operand
+            if (op == "FNEG") {
+                if (toks.size() < 2) throw runtime_error("FNEG needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FNEG: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = -regs_f32[idx];
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DNEG - Double Negate
+            // Syntax: DNEG operand
+            if (op == "DNEG") {
+                if (toks.size() < 2) throw runtime_error("DNEG needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DNEG: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = -regs_f64[idx];
+                continue;
+            }
+            
+            // FSIN - Float Sine
+            // Syntax: FSIN operand
+            if (op == "FSIN") {
+                if (toks.size() < 2) throw runtime_error("FSIN needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FSIN: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = sinf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DSIN - Double Sine
+            // Syntax: DSIN operand
+            if (op == "DSIN") {
+                if (toks.size() < 2) throw runtime_error("DSIN needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DSIN: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = sin(regs_f64[idx]);
+                continue;
+            }
+            
+            // FCOS - Float Cosine
+            // Syntax: FCOS operand
+            if (op == "FCOS") {
+                if (toks.size() < 2) throw runtime_error("FCOS needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FCOS: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = cosf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DCOS - Double Cosine
+            // Syntax: DCOS operand
+            if (op == "DCOS") {
+                if (toks.size() < 2) throw runtime_error("DCOS needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DCOS: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = cos(regs_f64[idx]);
+                continue;
+            }
+            
+            // FTAN - Float Tangent
+            // Syntax: FTAN operand
+            if (op == "FTAN") {
+                if (toks.size() < 2) throw runtime_error("FTAN needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FTAN: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = tanf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DTAN - Double Tangent
+            // Syntax: DTAN operand
+            if (op == "DTAN") {
+                if (toks.size() < 2) throw runtime_error("DTAN needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DTAN: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = tan(regs_f64[idx]);
+                continue;
+            }
+            
+            // FPOW - Float Power
+            // Syntax: FPOW base exponent (exponent = base ^ exponent)
+            if (op == "FPOW") {
+                if (toks.size() < 3) throw runtime_error("FPOW needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                float aval = 0.0f;
+                if (is_f32(A)) aval = regs_f32[get_f32_index(A)];
+                else if (is_float_literal(A)) aval = parse_float(A);
+                else throw runtime_error("FPOW: base must be f32 or float literal");
+                
+                if (!is_f32(B)) throw runtime_error("FPOW: exponent must be f32 register");
+                int bi = get_f32_index(B);
+                regs_f32[bi] = powf(aval, regs_f32[bi]);
+                set_float_flags(regs_f32[bi]);
+                continue;
+            }
+
+            // DPOW - Double Power
+            // Syntax: DPOW base exponent (exponent = base ^ exponent)
+            if (op == "DPOW") {
+                if (toks.size() < 3) throw runtime_error("DPOW needs 2 arguments");
+                string A = toks[1], B = toks[2];
+                
+                double aval = 0.0;
+                if (is_f64(A)) aval = regs_f64[get_f64_index(A)];
+                else if (is_float_literal(A)) aval = stod(A);
+                else throw runtime_error("DPOW: base must be f64 or float literal");
+                
+                if (!is_f64(B)) throw runtime_error("DPOW: exponent must be f64 register");
+                int bi = get_f64_index(B);
+                regs_f64[bi] = pow(aval, regs_f64[bi]);
+                continue;
+            }
+            
+            // FLOG - Float Natural Logarithm
+            // Syntax: FLOG operand
+            if (op == "FLOG") {
+                if (toks.size() < 2) throw runtime_error("FLOG needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FLOG: operand must be f32 register");
+                int idx = get_f32_index(A);
+                
+                if (regs_f32[idx] <= 0.0f) throw runtime_error("FLOG: logarithm of non-positive number");
+                
+                regs_f32[idx] = logf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DLOG - Double Natural Logarithm
+            // Syntax: DLOG operand
+            if (op == "DLOG") {
+                if (toks.size() < 2) throw runtime_error("DLOG needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DLOG: operand must be f64 register");
+                int idx = get_f64_index(A);
+                
+                if (regs_f64[idx] <= 0.0) throw runtime_error("DLOG: logarithm of non-positive number");
+                
+                regs_f64[idx] = log(regs_f64[idx]);
+                continue;
+            }
+            
+            // FEXP - Float Exponential (e^x)
+            // Syntax: FEXP operand
+            if (op == "FEXP") {
+                if (toks.size() < 2) throw runtime_error("FEXP needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FEXP: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = expf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DEXP - Double Exponential (e^x)
+            // Syntax: DEXP operand
+            if (op == "DEXP") {
+                if (toks.size() < 2) throw runtime_error("DEXP needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DEXP: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = exp(regs_f64[idx]);
+                continue;
+            }
+            
+            // FFLOOR - Float Floor
+            // Syntax: FFLOOR operand
+            if (op == "FFLOOR") {
+                if (toks.size() < 2) throw runtime_error("FFLOOR needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FFLOOR: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = floorf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DFLOOR - Double Floor
+            // Syntax: DFLOOR operand
+            if (op == "DFLOOR") {
+                if (toks.size() < 2) throw runtime_error("DFLOOR needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DFLOOR: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = floor(regs_f64[idx]);
+                continue;
+            }
+            
+            // FCEIL - Float Ceiling
+            // Syntax: FCEIL operand
+            if (op == "FCEIL") {
+                if (toks.size() < 2) throw runtime_error("FCEIL needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FCEIL: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = ceilf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DCEIL - Double Ceiling
+            // Syntax: DCEIL operand
+            if (op == "DCEIL") {
+                if (toks.size() < 2) throw runtime_error("DCEIL needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DCEIL: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = ceil(regs_f64[idx]);
+                continue;
+            }
+            
+            // FROUND - Float Round to Nearest
+            // Syntax: FROUND operand
+            if (op == "FROUND") {
+                if (toks.size() < 2) throw runtime_error("FROUND needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f32(A)) throw runtime_error("FROUND: operand must be f32 register");
+                int idx = get_f32_index(A);
+                regs_f32[idx] = roundf(regs_f32[idx]);
+                set_float_flags(regs_f32[idx]);
+                continue;
+            }
+
+            // DROUND - Double Round to Nearest
+            // Syntax: DROUND operand
+            if (op == "DROUND") {
+                if (toks.size() < 2) throw runtime_error("DROUND needs 1 argument");
+                string A = toks[1];
+                
+                if (!is_f64(A)) throw runtime_error("DROUND: operand must be f64 register");
+                int idx = get_f64_index(A);
+                regs_f64[idx] = round(regs_f64[idx]);
+                continue;
+            }
+            
+            // ITOF - Integer to Float conversion
+            // Syntax: ITOF int_source float_dest
+            if (op == "ITOF") {
+                if (toks.size() < 3) throw runtime_error("ITOF needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int ival = 0;
+                if (is_r8(src)) ival = (i8)regs8[get_r8_index(src)];  // Signed conversion
+                else if (is_r16(src)) ival = (i16)regs16[get_r16_index(src)];
+                else if (is_number(src)) ival = parse_int(src);
+                else throw runtime_error("ITOF: source must be integer register or literal");
+                
+                if (!is_f32(dst)) throw runtime_error("ITOF: destination must be f32 register");
+                regs_f32[get_f32_index(dst)] = (float)ival;
+                continue;
+            }
+
+            // ITOD - Integer to Double conversion
+            // Syntax: ITOD int_source double_dest
+            if (op == "ITOD") {
+                if (toks.size() < 3) throw runtime_error("ITOD needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int ival = 0;
+                if (is_r8(src)) ival = (i8)regs8[get_r8_index(src)];
+                else if (is_r16(src)) ival = (i16)regs16[get_r16_index(src)];
+                else if (is_number(src)) ival = parse_int(src);
+                else throw runtime_error("ITOD: source must be integer register or literal");
+                
+                if (!is_f64(dst)) throw runtime_error("ITOD: destination must be f64 register");
+                regs_f64[get_f64_index(dst)] = (double)ival;
+                continue;
+            }
+            
+            // FTOI - Float to Integer conversion (truncates)
+            // Syntax: FTOI float_source int_dest
+            if (op == "FTOI") {
+                if (toks.size() < 3) throw runtime_error("FTOI needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                if (!is_f32(src)) throw runtime_error("FTOI: source must be f32 register");
+                float fval = regs_f32[get_f32_index(src)];
+                int ival = (int)fval;  // Truncate towards zero
+                
+                if (is_r8(dst)) regs8[get_r8_index(dst)] = (u8)ival;
+                else if (is_r16(dst)) regs16[get_r16_index(dst)] = (u16)ival;
+                else throw runtime_error("FTOI: destination must be integer register");
+                continue;
+            }
+
+            // FTOD - Float to Double conversion
+            // Syntax: FTOD f32_source f64_dest
+            if (op == "FTOD") {
+                if (toks.size() < 3) throw runtime_error("FTOD needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                if (!is_f32(src)) throw runtime_error("FTOD: source must be f32 register");
+                if (!is_f64(dst)) throw runtime_error("FTOD: destination must be f64 register");
+                
+                regs_f64[get_f64_index(dst)] = (double)regs_f32[get_f32_index(src)];
+                continue;
+            }
+
+            // DTOI - Double to Integer conversion (truncates)
+            // Syntax: DTOI double_source int_dest
+            if (op == "DTOI") {
+                if (toks.size() < 3) throw runtime_error("DTOI needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                if (!is_f64(src)) throw runtime_error("DTOI: source must be f64 register");
+                double dval = regs_f64[get_f64_index(src)];
+                int ival = (int)dval;
+                
+                if (is_r8(dst)) regs8[get_r8_index(dst)] = (u8)ival;
+                else if (is_r16(dst)) regs16[get_r16_index(dst)] = (u16)ival;
+                else throw runtime_error("DTOI: destination must be integer register");
+                continue;
+            }
+
+            // DTOF - Double to Float conversion
+            // Syntax: DTOF f64_source f32_dest
+            if (op == "DTOF") {
+                if (toks.size() < 3) throw runtime_error("DTOF needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                if (!is_f64(src)) throw runtime_error("DTOF: source must be f64 register");
+                if (!is_f32(dst)) throw runtime_error("DTOF: destination must be f32 register");
+                
+                regs_f32[get_f32_index(dst)] = (float)regs_f64[get_f64_index(src)];
+                continue;
+            }
+            
+            // Float conditional jumps
+            if (op == "JFE") {  // Jump if Float Equal
+                if (toks.size() < 2) throw runtime_error("JFE needs a label");
+                if (FE) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            if (op == "JFNE") {  // Jump if Float Not Equal
+                if (toks.size() < 2) throw runtime_error("JFNE needs a label");
+                if (!FE) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            if (op == "JFG") {  // Jump if Float Greater
+                if (toks.size() < 2) throw runtime_error("JFG needs a label");
+                if (FG) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            if (op == "JFGE") {  // Jump if Float Greater or Equal
+                if (toks.size() < 2) throw runtime_error("JFGE needs a label");
+                if (FG || FE) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            if (op == "JFL") {  // Jump if Float Less
+                if (toks.size() < 2) throw runtime_error("JFL needs a label");
+                if (FL) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            if (op == "JFLE") {  // Jump if Float Less or Equal
+                if (toks.size() < 2) throw runtime_error("JFLE needs a label");
+                if (FL || FE) {
+                    string lbl = toks[1];
+                    if (!labels.count(lbl)) throw runtime_error("unknown label: " + lbl);
+                    pc = labels[lbl];
+                }
+                continue;
+            }
+            
+            // FPRINT - Print float value
+            if (op == "FPRINT") {
+                if (toks.size() < 2) throw runtime_error("FPRINT needs 1 argument");
+                string A = toks[1];
+                
+                if (is_f32(A)) {
+                    int idx = get_f32_index(A);
+                    cout << A << " = " << regs_f32[idx] << "\n";
+                } else {
+                    throw runtime_error("FPRINT: argument must be f32 register");
+                }
+                continue;
+            }
+
+            // DPRINT - Print double value
+            // Syntax: DPRINT operand
+            if (op == "DPRINT") {
+                if (toks.size() < 2) throw runtime_error("DPRINT needs 1 argument");
+                string A = toks[1];
+                
+                if (is_f64(A)) {
+                    int idx = get_f64_index(A);
+                    cout << A << " = " << regs_f64[idx] << "\n";
+                } else {
+                    throw runtime_error("DPRINT: argument must be f64 register");
+                }
+                continue;
+            }
+
+            // CMOVE/CMOVZ - Conditional Move if Equal/Zero (ZF=1)
             // Syntax: CMOVE source destination
             if (op == "CMOVE" || op == "CMOVZ") {
                 if (toks.size() < 3) throw runtime_error("CMOVE needs 2 arguments");
@@ -513,12 +1365,35 @@ struct CPU {
                             regs8[bi] = (u8)result;
                             set_flags_sub(aval, bval, result, false);
                         } else if (opcode == "MUL") {
-                            if (sign == 'S') regs8[bi] = (u8)((i8)bval * (i8)aval);
-                            else regs8[bi] = (u8)((u8)bval * (u8)aval);
+                            // 8x8 = 16-bit result: low in bi, high in bi+1
+                            if (sign == 'S') {
+                                i16 full_result = (i8)bval * (i8)aval;
+                                regs8[bi] = (u8)(full_result & 0xFF);
+                                if (bi + 1 < 32) regs8[bi + 1] = (u8)((full_result >> 8) & 0xFF);
+                            } else {
+                                u16 full_result = (u8)bval * (u8)aval;
+                                regs8[bi] = (u8)(full_result & 0xFF);
+                                if (bi + 1 < 32) regs8[bi + 1] = (u8)((full_result >> 8) & 0xFF);
+                            }
                         } else if (opcode == "DIV") {
-                            if (aval == 0) throw runtime_error("division by zero");
-                            if (sign == 'S') regs8[bi] = (u8)((i8)bval / (i8)aval);
-                            else regs8[bi] = (u8)((u8)bval / (u8)aval);
+                            if (aval == 0) {
+                                // Division by zero - set error flag and continue
+                                OF = true;  // Use overflow flag to signal error
+                                ZF = true;
+                                regs8[bi] = 0;  // Set result to 0
+                                cout << "WARNING: Division by zero at instruction, result set to 0\n";
+                            } else {
+                                OF = false;
+                                if (sign == 'S') {
+                                    regs8[bi] = (u8)((i8)bval / (i8)aval);
+                                    // Store remainder in bi+1 if available
+                                    if (bi + 1 < 32) regs8[bi + 1] = (u8)((i8)bval % (i8)aval);
+                                } else {
+                                    regs8[bi] = (u8)((u8)bval / (u8)aval);
+                                    // Store remainder in bi+1 if available
+                                    if (bi + 1 < 32) regs8[bi + 1] = (u8)((u8)bval % (u8)aval);
+                                }
+                            }
                         }
                     } else if (is_mem(B)) {
                         u32 addr = resolve_address(B);
@@ -534,12 +1409,25 @@ struct CPU {
                             mem_write8_at(addr, (u8)result);
                             set_flags_sub(aval, bval, result, false);
                         } else if (opcode == "MUL") {
-                            if (sign == 'S') mem_write8_at(addr, (u8)((i8)bval * (i8)aval));
-                            else mem_write8_at(addr, (u8)((u8)bval * (u8)aval));
+                            // For memory, store low byte only (high byte lost)
+                            if (sign == 'S') {
+                                i16 full_result = (i8)bval * (i8)aval;
+                                mem_write8_at(addr, (u8)(full_result & 0xFF));
+                            } else {
+                                u16 full_result = (u8)bval * (u8)aval;
+                                mem_write8_at(addr, (u8)(full_result & 0xFF));
+                            }
                         } else if (opcode == "DIV") {
-                            if (aval == 0) throw runtime_error("division by zero");
-                            if (sign == 'S') mem_write8_at(addr, (u8)((i8)bval / (i8)aval));
-                            else mem_write8_at(addr, (u8)((u8)bval / (u8)aval));
+                            if (aval == 0) {
+                                OF = true;
+                                ZF = true;
+                                mem_write8_at(addr, 0);
+                                cout << "WARNING: Division by zero at instruction, result set to 0\n";
+                            } else {
+                                OF = false;
+                                if (sign == 'S') mem_write8_at(addr, (u8)((i8)bval / (i8)aval));
+                                else mem_write8_at(addr, (u8)((u8)bval / (u8)aval));
+                            }
                         }
                     } else {
                         throw runtime_error("B must be r8N or memory for 8-bit op: " + B);
@@ -566,12 +1454,34 @@ struct CPU {
                             regs16[bi] = (u16)result;
                             set_flags_sub(aval, bval, result, true);
                         } else if (opcode == "MUL") {
-                            if (sign == 'S') regs16[bi] = (u16)((i16)bval * (i16)aval);
-                            else regs16[bi] = (u16)((u16)bval * (u16)aval);
+                            // 16x16 = 32-bit result: low in bi, high in bi+1
+                            if (sign == 'S') {
+                                i32 full_result = (i16)bval * (i16)aval;
+                                regs16[bi] = (u16)(full_result & 0xFFFF);
+                                if (bi + 1 < 32) regs16[bi + 1] = (u16)((full_result >> 16) & 0xFFFF);
+                            } else {
+                                u32 full_result = (u16)bval * (u16)aval;
+                                regs16[bi] = (u16)(full_result & 0xFFFF);
+                                if (bi + 1 < 32) regs16[bi + 1] = (u16)((full_result >> 16) & 0xFFFF);
+                            }
                         } else if (opcode == "DIV") {
-                            if (aval == 0) throw runtime_error("division by zero");
-                            if (sign == 'S') regs16[bi] = (u16)((i16)bval / (i16)aval);
-                            else regs16[bi] = (u16)((u16)bval / (u16)aval);
+                            if (aval == 0) {
+                                OF = true;
+                                ZF = true;
+                                regs16[bi] = 0;
+                                cout << "WARNING: Division by zero at instruction, result set to 0\n";
+                            } else {
+                                OF = false;
+                                if (sign == 'S') {
+                                    regs16[bi] = (u16)((i16)bval / (i16)aval);
+                                    // Store remainder in bi+1 if available
+                                    if (bi + 1 < 32) regs16[bi + 1] = (u16)((i16)bval % (i16)aval);
+                                } else {
+                                    regs16[bi] = (u16)((u16)bval / (u16)aval);
+                                    // Store remainder in bi+1 if available
+                                    if (bi + 1 < 32) regs16[bi + 1] = (u16)((u16)bval % (u16)aval);
+                                }
+                            }
                         }
                     } else if (is_mem(B)) {
                         u32 addr = resolve_address(B);
@@ -587,12 +1497,25 @@ struct CPU {
                             mem_write16_at(addr, (u16)result);
                             set_flags_sub(aval, bval, result, true);
                         } else if (opcode == "MUL") {
-                            if (sign == 'S') mem_write16_at(addr, (u16)((i16)bval * (i16)aval));
-                            else mem_write16_at(addr, (u16)((u16)bval * (u16)aval));
+                            // For memory, store low word only (high word lost)
+                            if (sign == 'S') {
+                                i32 full_result = (i16)bval * (i16)aval;
+                                mem_write16_at(addr, (u16)(full_result & 0xFFFF));
+                            } else {
+                                u32 full_result = (u16)bval * (u16)aval;
+                                mem_write16_at(addr, (u16)(full_result & 0xFFFF));
+                            }
                         } else if (opcode == "DIV") {
-                            if (aval == 0) throw runtime_error("division by zero");
-                            if (sign == 'S') mem_write16_at(addr, (u16)((i16)bval / (i16)aval));
-                            else mem_write16_at(addr, (u16)((u16)bval / (u16)aval));
+                            if (aval == 0) {
+                                OF = true;
+                                ZF = true;
+                                mem_write16_at(addr, 0);
+                                cout << "WARNING: Division by zero at instruction, result set to 0\n";
+                            } else {
+                                OF = false;
+                                if (sign == 'S') mem_write16_at(addr, (u16)((i16)bval / (i16)aval));
+                                else mem_write16_at(addr, (u16)((u16)bval / (u16)aval));
+                            }
                         }
                     } else {
                         throw runtime_error("B must be r16N or memory for 16-bit op: " + B);
@@ -1146,12 +2069,16 @@ struct CPU {
                     if (addr < ram8_offset || addr >= ram8_offset + ram8_size) {
                         throw runtime_error("LREAD address must be within 8-bit RAM region");
                     }
+                    u8 val = mem_read8_at(addr);
+                    if (!is_r8(B)) throw runtime_error("LREAD target must be r8N");
+                    int bi = get_r8_index(B);
+                    regs8[bi] = val;
+                } else {  // HREAD
+                    u16 val = mem_read16_at(addr);  // Changed to read 16 bits
+                    if (!is_r16(B)) throw runtime_error("HREAD target must be r16N");  // Changed to r16
+                    int bi = get_r16_index(B);  // Changed to get r16 index
+                    regs16[bi] = val;  // Changed to write to r16
                 }
-                
-                u8 val = mem_read8_at(addr);
-                if (!is_r8(B)) throw runtime_error("LREAD target must be r8N");
-                int bi = get_r8_index(B);
-                regs8[bi] = val;
                 continue;
             }
 
@@ -1318,17 +2245,44 @@ struct CPU {
 
                 if (is_r8(A)) {
                     int idx = get_r8_index(A);
-                    if (op == "INC") regs8[idx] = (u8)(regs8[idx] + 1);
-                    else regs8[idx] = (u8)(regs8[idx] - 1);
+                    u8 result;
+                    if (op == "INC") {
+                        result = (u8)(regs8[idx] + 1);
+                        regs8[idx] = result;
+                    } else {
+                        result = (u8)(regs8[idx] - 1);
+                        regs8[idx] = result;
+                    }
+                    // Set flags
+                    ZF = (result == 0);
+                    SF = ((result & 0x80) != 0);
                 } else if (is_r16(A)) {
                     int idx = get_r16_index(A);
-                    if (op == "INC") regs16[idx] = (u16)(regs16[idx] + 1);
-                    else regs16[idx] = (u16)(regs16[idx] - 1);
+                    u16 result;
+                    if (op == "INC") {
+                        result = (u16)(regs16[idx] + 1);
+                        regs16[idx] = result;
+                    } else {
+                        result = (u16)(regs16[idx] - 1);
+                        regs16[idx] = result;
+                    }
+                    // Set flags
+                    ZF = (result == 0);
+                    SF = ((result & 0x8000) != 0);
                 } else if (is_mem(A)) {
                     u32 addr = resolve_address(A);
                     u8 val = mem_read8_at(addr);
-                    if (op == "INC") mem_write8_at(addr, val + 1);
-                    else mem_write8_at(addr, val - 1);
+                    u8 result;
+                    if (op == "INC") {
+                        result = val + 1;
+                        mem_write8_at(addr, result);
+                    } else {
+                        result = val - 1;
+                        mem_write8_at(addr, result);
+                    }
+                    // Set flags
+                    ZF = (result == 0);
+                    SF = ((result & 0x80) != 0);
                 } else throw runtime_error(op + " operand must be r8N, r16N, or [addr]");
 
                 continue;
@@ -1711,6 +2665,121 @@ struct CPU {
                 continue;
             }
 
+            // CMPXCHG - Compare and Exchange (atomic)
+            // Syntax: CMPXCHG expected new_value destination
+            // If destination == expected, then destination = new_value and ZF=1
+            // Else ZF=0 (operation failed)
+            if (op == "CMPXCHG") {
+                if (toks.size() < 4) throw runtime_error("CMPXCHG needs 3 arguments");
+                string expected_str = toks[1], new_str = toks[2], dst = toks[3];
+                
+                int expected = 0, new_val = 0;
+                bool is_16bit = false;
+                
+                // Parse expected value
+                if (is_r8(expected_str)) {
+                    expected = regs8[get_r8_index(expected_str)];
+                } else if (is_r16(expected_str)) {
+                    expected = regs16[get_r16_index(expected_str)];
+                    is_16bit = true;
+                } else if (is_number(expected_str)) {
+                    expected = parse_int(expected_str);
+                } else {
+                    throw runtime_error("CMPXCHG expected must be register or immediate");
+                }
+                
+                // Parse new value
+                if (is_r8(new_str)) {
+                    new_val = regs8[get_r8_index(new_str)];
+                } else if (is_r16(new_str)) {
+                    new_val = regs16[get_r16_index(new_str)];
+                    is_16bit = true;
+                } else if (is_number(new_str)) {
+                    new_val = parse_int(new_str);
+                } else {
+                    throw runtime_error("CMPXCHG new_value must be register or immediate");
+                }
+                
+                // Atomic compare and exchange on destination
+                if (is_r8(dst)) {
+                    int idx = get_r8_index(dst);
+                    if (regs8[idx] == (u8)expected) {
+                        regs8[idx] = (u8)new_val;
+                        ZF = true;  // Success
+                    } else {
+                        ZF = false;  // Failed
+                    }
+                } else if (is_r16(dst)) {
+                    int idx = get_r16_index(dst);
+                    if (regs16[idx] == (u16)expected) {
+                        regs16[idx] = (u16)new_val;
+                        ZF = true;
+                    } else {
+                        ZF = false;
+                    }
+                } else if (is_mem(dst)) {
+                    u32 addr = resolve_address(dst);
+                    if (is_16bit) {
+                        u16 current = mem_read16_at(addr);
+                        if (current == (u16)expected) {
+                            mem_write16_at(addr, (u16)new_val);
+                            ZF = true;
+                        } else {
+                            ZF = false;
+                        }
+                    } else {
+                        u8 current = mem_read8_at(addr);
+                        if (current == (u8)expected) {
+                            mem_write8_at(addr, (u8)new_val);
+                            ZF = true;
+                        } else {
+                            ZF = false;
+                        }
+                    }
+                } else {
+                    throw runtime_error("CMPXCHG destination must be register or memory");
+                }
+                continue;
+            }
+
+            // XADD - Exchange and Add (atomic)
+            // Syntax: XADD source destination
+            // temp = destination; destination = destination + source; source = temp
+            if (op == "XADD") {
+                if (toks.size() < 3) throw runtime_error("XADD needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                // Both operands must be same size
+                if (is_r8(src) && is_r8(dst)) {
+                    int si = get_r8_index(src);
+                    int di = get_r8_index(dst);
+                    u8 temp = regs8[di];
+                    regs8[di] = regs8[di] + regs8[si];
+                    regs8[si] = temp;
+                } else if (is_r16(src) && is_r16(dst)) {
+                    int si = get_r16_index(src);
+                    int di = get_r16_index(dst);
+                    u16 temp = regs16[di];
+                    regs16[di] = regs16[di] + regs16[si];
+                    regs16[si] = temp;
+                } else if (is_r8(src) && is_mem(dst)) {
+                    int si = get_r8_index(src);
+                    u32 addr = resolve_address(dst);
+                    u8 temp = mem_read8_at(addr);
+                    mem_write8_at(addr, temp + regs8[si]);
+                    regs8[si] = temp;
+                } else if (is_r16(src) && is_mem(dst)) {
+                    int si = get_r16_index(src);
+                    u32 addr = resolve_address(dst);
+                    u16 temp = mem_read16_at(addr);
+                    mem_write16_at(addr, temp + regs16[si]);
+                    regs16[si] = temp;
+                } else {
+                    throw runtime_error("XADD: incompatible operands (must be reg-reg or reg-mem of same size)");
+                }
+                continue;
+            }
+
             // IBTS - Insert Bit String (80386 early stepping only)
             // Syntax: IBTS base bit_offset source bit_count
             // Extracts bits from source register and inserts them into base
@@ -1784,6 +2853,145 @@ struct CPU {
                     throw runtime_error("IBTS base must be register or memory");
                 }
                 
+                continue;
+            }
+
+            // BSF - Bit Scan Forward (find index of first set bit from LSB)
+            // Syntax: BSF source destination
+            // Scans source from bit 0 upward, stores index of first 1-bit in destination
+            // Sets ZF=1 if source is zero (no bits set), ZF=0 otherwise
+            if (op == "BSF") {
+                if (toks.size() < 3) throw runtime_error("BSF needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_val = 0;
+                bool is_16bit = false;
+                
+                // Get source value
+                if (is_r8(src)) {
+                    src_val = regs8[get_r8_index(src)];
+                } else if (is_r16(src)) {
+                    src_val = regs16[get_r16_index(src)];
+                    is_16bit = true;
+                } else if (is_mem(src)) {
+                    u32 addr = resolve_address(src);
+                    src_val = mem_read8_at(addr);
+                } else if (is_number(src)) {
+                    src_val = parse_int(src);
+                } else {
+                    throw runtime_error("BSF: unsupported source");
+                }
+                
+                // Find first set bit
+                if (src_val == 0) {
+                    ZF = true;  // No bits set
+                    // Destination is undefined, but we'll leave it unchanged
+                } else {
+                    ZF = false;
+                    int bit_index = 0;
+                    int max_bits = is_16bit ? 16 : 8;
+                    
+                    for (int i = 0; i < max_bits; i++) {
+                        if (src_val & (1 << i)) {
+                            bit_index = i;
+                            break;
+                        }
+                    }
+                    
+                    // Store result in destination
+                    if (is_r8(dst)) {
+                        regs8[get_r8_index(dst)] = (u8)bit_index;
+                    } else if (is_r16(dst)) {
+                        regs16[get_r16_index(dst)] = (u16)bit_index;
+                    } else {
+                        throw runtime_error("BSF: destination must be register");
+                    }
+                }
+                continue;
+            }
+
+            // BSR - Bit Scan Reverse (find index of last set bit from MSB)
+            // Syntax: BSR source destination
+            // Scans source from MSB downward, stores index of first 1-bit in destination
+            // Sets ZF=1 if source is zero (no bits set), ZF=0 otherwise
+            if (op == "BSR") {
+                if (toks.size() < 3) throw runtime_error("BSR needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_val = 0;
+                bool is_16bit = false;
+                
+                // Get source value
+                if (is_r8(src)) {
+                    src_val = regs8[get_r8_index(src)];
+                } else if (is_r16(src)) {
+                    src_val = regs16[get_r16_index(src)];
+                    is_16bit = true;
+                } else if (is_mem(src)) {
+                    u32 addr = resolve_address(src);
+                    src_val = mem_read8_at(addr);
+                } else if (is_number(src)) {
+                    src_val = parse_int(src);
+                } else {
+                    throw runtime_error("BSR: unsupported source");
+                }
+                
+                // Find last set bit (scan from MSB)
+                if (src_val == 0) {
+                    ZF = true;  // No bits set
+                    // Destination is undefined, but we'll leave it unchanged
+                } else {
+                    ZF = false;
+                    int bit_index = 0;
+                    int max_bits = is_16bit ? 16 : 8;
+                    
+                    for (int i = max_bits - 1; i >= 0; i--) {
+                        if (src_val & (1 << i)) {
+                            bit_index = i;
+                            break;
+                        }
+                    }
+                    
+                    // Store result in destination
+                    if (is_r8(dst)) {
+                        regs8[get_r8_index(dst)] = (u8)bit_index;
+                    } else if (is_r16(dst)) {
+                        regs16[get_r16_index(dst)] = (u16)bit_index;
+                    } else {
+                        throw runtime_error("BSR: destination must be register");
+                    }
+                }
+                continue;
+            }
+
+            // BSWAP - Byte Swap (reverse byte order for endianness conversion)
+            // Syntax: BSWAP operand
+            // For 16-bit: 0x1234 becomes 0x3412
+            // For 8-bit: No-op (undefined behavior in real x86, we'll just do nothing)
+            if (op == "BSWAP") {
+                if (toks.size() < 2) throw runtime_error("BSWAP needs 1 argument");
+                string operand = toks[1];
+                
+                if (is_r8(operand)) {
+                    // 8-bit BSWAP is undefined/no-op in real x86
+                    // We'll just do nothing (some implementations zero it, but no-op is safer)
+                    int idx = get_r8_index(operand);
+                    // No operation for 8-bit
+                    (void)idx;  // Suppress unused warning
+                } else if (is_r16(operand)) {
+                    int idx = get_r16_index(operand);
+                    u16 val = regs16[idx];
+                    // Swap bytes: 0xAABB becomes 0xBBAA
+                    regs16[idx] = ((val & 0xFF) << 8) | ((val >> 8) & 0xFF);
+                } else if (is_mem(operand)) {
+                    u32 addr = resolve_address(operand);
+                    // Assume 16-bit memory operation
+                    u16 val = mem_read16_at(addr);
+                    u16 swapped = ((val & 0xFF) << 8) | ((val >> 8) & 0xFF);
+                    mem_write16_at(addr, swapped);
+                } else {
+                    throw runtime_error("BSWAP: operand must be register or memory");
+                }
                 continue;
             }
 
@@ -1886,6 +3094,56 @@ struct CPU {
                     SP += 2;
                 } else throw runtime_error("unsupported POP target: " + B);
 
+                continue;
+            }
+
+            // POPCNT - Population Count (count number of 1 bits)
+            // Syntax: POPCNT source destination
+            // Counts the number of set bits in source, stores count in destination
+            if (op == "POPCNT") {
+                if (toks.size() < 3) throw runtime_error("POPCNT needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_val = 0;
+                bool is_16bit = false;
+                
+                // Get source value
+                if (is_r8(src)) {
+                    src_val = regs8[get_r8_index(src)];
+                } else if (is_r16(src)) {
+                    src_val = regs16[get_r16_index(src)];
+                    is_16bit = true;
+                } else if (is_mem(src)) {
+                    u32 addr = resolve_address(src);
+                    src_val = mem_read8_at(addr);
+                } else if (is_number(src)) {
+                    src_val = parse_int(src);
+                } else {
+                    throw runtime_error("POPCNT: unsupported source");
+                }
+                
+                // Count set bits
+                int count = 0;
+                int max_bits = is_16bit ? 16 : 8;
+                
+                for (int i = 0; i < max_bits; i++) {
+                    if (src_val & (1 << i)) {
+                        count++;
+                    }
+                }
+                
+                // Set ZF if result is zero
+                ZF = (count == 0);
+                
+                // Store result in destination
+                if (is_r8(dst)) {
+                    regs8[get_r8_index(dst)] = (u8)count;
+                } else if (is_r16(dst)) {
+                    regs16[get_r16_index(dst)] = (u16)count;
+                } else {
+                    throw runtime_error("POPCNT: destination must be register");
+                }
+                
                 continue;
             }
 
@@ -2098,6 +3356,338 @@ struct CPU {
                 }
                 
                 regs16[get_r16_index(dst)] = (u16)(i16)val;  // Sign extend
+                continue;
+            }
+
+            // MOVS - Move String (copy from [source] to [destination])
+            // Syntax: MOVS source_reg dest_reg count_reg
+            // Copies 'count' bytes from address in source_reg to address in dest_reg
+            if (op == "MOVS") {
+                if (toks.size() < 4) throw runtime_error("MOVS needs 3 arguments: source_reg dest_reg count_reg");
+                string src_reg = toks[1], dst_reg = toks[2], count_reg = toks[3];
+                
+                // Get source address
+                u32 src_addr = 0;
+                if (is_r16(src_reg)) src_addr = regs16[get_r16_index(src_reg)];
+                else if (is_r8(src_reg)) src_addr = regs8[get_r8_index(src_reg)];
+                else throw runtime_error("MOVS: source must be register containing address");
+                
+                // Get destination address
+                u32 dst_addr = 0;
+                if (is_r16(dst_reg)) dst_addr = regs16[get_r16_index(dst_reg)];
+                else if (is_r8(dst_reg)) dst_addr = regs8[get_r8_index(dst_reg)];
+                else throw runtime_error("MOVS: destination must be register containing address");
+                
+                // Get count
+                u32 count = 0;
+                if (is_r16(count_reg)) count = regs16[get_r16_index(count_reg)];
+                else if (is_r8(count_reg)) count = regs8[get_r8_index(count_reg)];
+                else if (is_number(count_reg)) count = parse_int(count_reg);
+                else throw runtime_error("MOVS: count must be register or immediate");
+                
+                // Copy bytes
+                for (u32 i = 0; i < count; i++) {
+                    u8 byte = mem_read8_at(src_addr + i);
+                    mem_write8_at(dst_addr + i, byte);
+                }
+                
+                continue;
+            }
+
+            // CMPS - Compare String (compare two memory blocks)
+            // Syntax: CMPS source_reg dest_reg count_reg
+            // Compares 'count' bytes, sets ZF=1 if equal, ZF=0 if different
+            if (op == "CMPS") {
+                if (toks.size() < 4) throw runtime_error("CMPS needs 3 arguments: source_reg dest_reg count_reg");
+                string src_reg = toks[1], dst_reg = toks[2], count_reg = toks[3];
+                
+                // Get source address
+                u32 src_addr = 0;
+                if (is_r16(src_reg)) src_addr = regs16[get_r16_index(src_reg)];
+                else if (is_r8(src_reg)) src_addr = regs8[get_r8_index(src_reg)];
+                else throw runtime_error("CMPS: source must be register containing address");
+                
+                // Get destination address
+                u32 dst_addr = 0;
+                if (is_r16(dst_reg)) dst_addr = regs16[get_r16_index(dst_reg)];
+                else if (is_r8(dst_reg)) dst_addr = regs8[get_r8_index(dst_reg)];
+                else throw runtime_error("CMPS: destination must be register containing address");
+                
+                // Get count
+                u32 count = 0;
+                if (is_r16(count_reg)) count = regs16[get_r16_index(count_reg)];
+                else if (is_r8(count_reg)) count = regs8[get_r8_index(count_reg)];
+                else if (is_number(count_reg)) count = parse_int(count_reg);
+                else throw runtime_error("CMPS: count must be register or immediate");
+                
+                // Compare bytes
+                ZF = true;  // Assume equal
+                for (u32 i = 0; i < count; i++) {
+                    u8 byte1 = mem_read8_at(src_addr + i);
+                    u8 byte2 = mem_read8_at(dst_addr + i);
+                    if (byte1 != byte2) {
+                        ZF = false;
+                        SF = (byte2 < byte1);  // Set sign based on comparison
+                        break;
+                    }
+                }
+                
+                continue;
+            }
+
+            // SCAS - Scan String (search for value in memory block)
+            // Syntax: SCAS value address_reg count_reg result_reg
+            // Searches for 'value' in 'count' bytes starting at address
+            // Stores index of first match in result_reg, sets ZF=1 if found
+            if (op == "SCAS") {
+                if (toks.size() < 5) throw runtime_error("SCAS needs 4 arguments: value address_reg count_reg result_reg");
+                string value_str = toks[1], addr_reg = toks[2], count_reg = toks[3], result_reg = toks[4];
+                
+                // Get value to search for
+                u8 search_val = 0;
+                if (is_r8(value_str)) search_val = regs8[get_r8_index(value_str)];
+                else if (is_number(value_str)) search_val = (u8)parse_int(value_str);
+                else throw runtime_error("SCAS: search value must be r8 or immediate");
+                
+                // Get address
+                u32 addr = 0;
+                if (is_r16(addr_reg)) addr = regs16[get_r16_index(addr_reg)];
+                else if (is_r8(addr_reg)) addr = regs8[get_r8_index(addr_reg)];
+                else throw runtime_error("SCAS: address must be register");
+                
+                // Get count
+                u32 count = 0;
+                if (is_r16(count_reg)) count = regs16[get_r16_index(count_reg)];
+                else if (is_r8(count_reg)) count = regs8[get_r8_index(count_reg)];
+                else if (is_number(count_reg)) count = parse_int(count_reg);
+                else throw runtime_error("SCAS: count must be register or immediate");
+                
+                // Search for value
+                ZF = false;  // Assume not found
+                u32 found_index = 0;
+                for (u32 i = 0; i < count; i++) {
+                    u8 byte = mem_read8_at(addr + i);
+                    if (byte == search_val) {
+                        ZF = true;  // Found
+                        found_index = i;
+                        break;
+                    }
+                }
+                
+                // Store result index
+                if (is_r8(result_reg)) {
+                    regs8[get_r8_index(result_reg)] = (u8)found_index;
+                } else if (is_r16(result_reg)) {
+                    regs16[get_r16_index(result_reg)] = (u16)found_index;
+                } else {
+                    throw runtime_error("SCAS: result must be register");
+                }
+                
+                continue;
+            }
+
+            // LODS - Load String (load byte from memory to register)
+            // Syntax: LODS address_reg dest_reg [offset]
+            // Loads byte from [address + offset] into dest_reg
+            if (op == "LODS") {
+                if (toks.size() < 3) throw runtime_error("LODS needs at least 2 arguments: address_reg dest_reg [offset]");
+                string addr_reg = toks[1], dest_reg = toks[2];
+                string offset_str = (toks.size() >= 4) ? toks[3] : "0";
+                
+                // Get address
+                u32 addr = 0;
+                if (is_r16(addr_reg)) addr = regs16[get_r16_index(addr_reg)];
+                else if (is_r8(addr_reg)) addr = regs8[get_r8_index(addr_reg)];
+                else throw runtime_error("LODS: address must be register");
+                
+                // Get offset
+                u32 offset = 0;
+                if (is_r8(offset_str)) offset = regs8[get_r8_index(offset_str)];
+                else if (is_r16(offset_str)) offset = regs16[get_r16_index(offset_str)];
+                else if (is_number(offset_str)) offset = parse_int(offset_str);
+                else throw runtime_error("LODS: offset must be register or immediate");
+                
+                // Load byte
+                u8 byte = mem_read8_at(addr + offset);
+                
+                // Store in destination
+                if (is_r8(dest_reg)) {
+                    regs8[get_r8_index(dest_reg)] = byte;
+                } else if (is_r16(dest_reg)) {
+                    regs16[get_r16_index(dest_reg)] = byte;
+                } else {
+                    throw runtime_error("LODS: destination must be register");
+                }
+                
+                continue;
+            }
+
+            // STOS - Store String (fill memory with value)
+            // Syntax: STOS value address_reg count_reg
+            // Fills 'count' bytes starting at address with value
+            if (op == "STOS") {
+                if (toks.size() < 4) throw runtime_error("STOS needs 3 arguments: value address_reg count_reg");
+                string value_str = toks[1], addr_reg = toks[2], count_reg = toks[3];
+                
+                // Get value to store
+                u8 store_val = 0;
+                if (is_r8(value_str)) store_val = regs8[get_r8_index(value_str)];
+                else if (is_number(value_str)) store_val = (u8)parse_int(value_str);
+                else throw runtime_error("STOS: value must be r8 or immediate");
+                
+                // Get address
+                u32 addr = 0;
+                if (is_r16(addr_reg)) addr = regs16[get_r16_index(addr_reg)];
+                else if (is_r8(addr_reg)) addr = regs8[get_r8_index(addr_reg)];
+                else throw runtime_error("STOS: address must be register");
+                
+                // Get count
+                u32 count = 0;
+                if (is_r16(count_reg)) count = regs16[get_r16_index(count_reg)];
+                else if (is_r8(count_reg)) count = regs8[get_r8_index(count_reg)];
+                else if (is_number(count_reg)) count = parse_int(count_reg);
+                else throw runtime_error("STOS: count must be register or immediate");
+                
+                // Fill memory
+                for (u32 i = 0; i < count; i++) {
+                    mem_write8_at(addr + i, store_val);
+                }
+                
+                continue;
+            }
+
+// CPUID - CPU Identification
+            // Syntax: CPUID function_id
+            // Returns CPU information based on function_id in various registers
+            // Function 0: Vendor string and max function
+            // Function 1: CPU features and family info
+            // Function 2: Cache information
+            // Function 0x80000000: Extended function support
+            if (op == "CPUID") {
+                if (toks.size() < 2) throw runtime_error("CPUID needs 1 argument (function_id)");
+                string func_str = toks[1];
+                
+                u32 function = 0;
+                if (is_r8(func_str)) function = regs8[get_r8_index(func_str)];
+                else if (is_r16(func_str)) function = regs16[get_r16_index(func_str)];
+                else if (is_number(func_str)) function = parse_int(func_str);
+                else throw runtime_error("CPUID: function must be register or immediate");
+                
+                // Clear output registers (r16_0 = EAX, r16_1 = EBX, r16_2 = ECX, r16_3 = EDX)
+                regs16[0] = 0;
+                regs16[1] = 0;
+                regs16[2] = 0;
+                regs16[3] = 0;
+                
+                switch (function) {
+                    case 0:
+                        // Function 0: Vendor ID and maximum function number
+                        regs16[0] = 2;  // Max basic function supported
+                        // Vendor string "VirtualCPU16" split across EBX, EDX, ECX
+                        // "Virt" in EBX
+                        regs16[1] = ('V' | ('i' << 8));
+                        regs8[4] = 'r';
+                        regs8[5] = 't';
+                        // "ualC" in EDX  
+                        regs16[3] = ('u' | ('a' << 8));
+                        regs8[6] = 'l';
+                        regs8[7] = 'C';
+                        // "PU16" in ECX
+                        regs16[2] = ('P' | ('U' << 8));
+                        regs8[4] = '1';
+                        regs8[5] = '6';
+                        break;
+                        
+                    case 1: {
+                        // Function 1: Processor Info and Feature Bits
+                        // EAX: Version Information
+                        // Family = 6, Model = 1, Stepping = 0
+                        regs16[0] = (6 << 8) | (1 << 4) | 0;
+                        
+                        // EBX: Brand Index, CLFLUSH line size, Max APIC IDs, Initial APIC ID
+                        regs16[1] = (0 << 8) | 8;  // CLFLUSH = 8
+                        
+                        // ECX: Feature flags (extended)
+                        // Bit 0: SSE3, Bit 9: SSSE3, Bit 19: SSE4.1, Bit 20: SSE4.2
+                        // Bit 23: POPCNT
+                        u16 ecx_features = 0;
+                        ecx_features |= (1 << 0);   // SSE3 (simulated)
+                        ecx_features |= (1 << 9);   // SSSE3 (simulated)
+                        // We actually have POPCNT, but bit 23 doesn't fit in 16-bit
+                        regs16[2] = ecx_features;
+                        
+                        // EDX: Feature flags (standard)
+                        // Bit 0: FPU, Bit 4: TSC, Bit 15: CMOV, Bit 23: MMX
+                        u16 edx_features = 0;
+                        edx_features |= (1 << 0);   // FPU - we have f32/f64
+                        edx_features |= (1 << 4);   // TSC (timestamp counter)
+                        edx_features |= (1 << 15);  // CMOV - we have conditional moves
+                        regs16[3] = edx_features;
+                        break;
+                    }
+                        
+                    case 2:
+                        // Function 2: Cache and TLB Information
+                        // Simplified: Report L1 cache info
+                        regs16[0] = 0x01;  // Cache descriptor
+                        regs16[1] = 0x2000; // 8KB L1 data cache (simulated)
+                        regs16[2] = 0x2000; // 8KB L1 instruction cache (simulated)
+                        regs16[3] = 0x0000; // No L2 cache info
+                        break;
+                        
+                    case 0x8000:
+                        // Function 0x80000000: Extended Function Support
+                        regs16[0] = 0x8004; // Max extended function (supports up to 0x80000004)
+                        regs16[1] = 0x0000;
+                        regs16[2] = 0x0000;
+                        regs16[3] = 0x0000;
+                        break;
+                        
+                    case 0x8001:
+                        // Function 0x80000001: Extended Processor Info
+                        regs16[0] = 0x0000;
+                        regs16[1] = 0x0000;
+                        // ECX: Extended features (LZCNT, etc.)
+                        regs16[2] = 0x0000;
+                        // EDX: Extended features
+                        regs16[3] = 0x0000;
+                        break;
+                        
+                    case 0x8002:
+                    case 0x8003:
+                    case 0x8004:
+                        // Processor Brand String (24 bytes across 3 calls, 8 bytes each)
+                        // "VirtualCPU v1.0 Muerte"
+                        if (function == 0x8002) {
+                            // First 8 bytes: "VirtualC"
+                            regs16[0] = ('V' | ('i' << 8));
+                            regs16[1] = ('r' | ('t' << 8));
+                            regs16[2] = ('u' | ('a' << 8));
+                            regs16[3] = ('l' | ('C' << 8));
+                        } else if (function == 0x8003) {
+                            // Next 8 bytes: "PU v1.0 "
+                            regs16[0] = ('P' | ('U' << 8));
+                            regs16[1] = (' ' | ('v' << 8));
+                            regs16[2] = ('1' | ('.' << 8));
+                            regs16[3] = ('0' | (' ' << 8));
+                        } else {
+                            // Last 8 bytes: "Muerte  " (6 chars + 2 spaces)
+                            regs16[0] = ('M' | ('u' << 8));
+                            regs16[1] = ('e' | ('r' << 8));
+                            regs16[2] = ('t' | ('e' << 8));
+                            regs16[3] = (' ' | (' ' << 8));
+                        }
+                        break;
+                        
+                    default:
+                        // Unknown function - return zeros
+                        regs16[0] = 0;
+                        regs16[1] = 0;
+                        regs16[2] = 0;
+                        regs16[3] = 0;
+                        break;
+                }
+                
                 continue;
             }
             throw runtime_error("unknown instruction: " + op);

@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=more unary stuff"
+if "%MSG%"=="" set "MSG=massive update nº2"
 
 git status
 
