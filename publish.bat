@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=minimal interrupt system will better it"
+if "%MSG%"=="" set "MSG=Asynchronous I/O"
 
 git status
 

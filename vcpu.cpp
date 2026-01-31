@@ -64,6 +64,9 @@ struct CPU {
     array<u32, 256> interrupt_vector_table{};
     queue<u8> pending_interrupts;
     u32 SP = 0; 
+    u32 timer_counter = 0;
+    u32 timer_interval = 0;
+    int interrupt_depth = 0;
     
     // memory
     vector<u8> mem;
@@ -83,6 +86,8 @@ struct CPU {
     bool FL = false;
     bool interrupt_enabled = true;
     bool trap_flag = false;
+    bool timer_enabled = false;
+    bool in_interrupt_handler = false;
 
     // memory layout
     size_t program_region = 0;
@@ -94,6 +99,12 @@ struct CPU {
 
     // program
     vector<string> program;
+
+    struct PendingIO {
+        u8 interrupt_num;
+        u32 cycles_remaining;
+    };
+    vector<PendingIO> pending_io;
 
     void set_flags(int a, int b) {
         int res = b - a;
@@ -189,6 +200,8 @@ struct CPU {
         
         // Disable interrupts during handler (can be re-enabled with STI)
         interrupt_enabled = false;
+        in_interrupt_handler = true;
+        interrupt_depth++;
         
         // Jump to handler
         if (handler_addr >= program.size()) {
@@ -417,11 +430,39 @@ struct CPU {
         size_t pc = 0;
         
         while (pc < program.size()) {
+            while (interrupt_enabled && !pending_interrupts.empty()) {
+                u8 int_num = pending_interrupts.front();
+                pending_interrupts.pop();
+                handle_interrupt(int_num, pc);
+            }
+
             string line = trim(program[pc]);
 
             if (line.empty() || line[0] == '#' || line.back() == ':') {
                 pc++;
                 continue;
+            }
+
+            // Only increment timer when NOT in interrupt handler
+            if (interrupt_depth == 0 && timer_enabled && timer_interval > 0) {
+                timer_counter++;
+                if (timer_counter >= timer_interval) {
+                    timer_counter = 0;
+                    u8 timer_int = (u8)interrupt_vector_table[255];
+                    trigger_interrupt(timer_int);
+                }
+            }
+
+            if (interrupt_depth == 0) {
+                for (size_t i = 0; i < pending_io.size(); ) {
+                    pending_io[i].cycles_remaining--;
+                    if (pending_io[i].cycles_remaining == 0) {
+                        trigger_interrupt(pending_io[i].interrupt_num);
+                        pending_io.erase(pending_io.begin() + i);
+                    } else {
+                        i++;
+                    }
+                }
             }
 
             auto toks = split_tok(line);
@@ -434,17 +475,21 @@ struct CPU {
 
             // QUIT / EXIT
             if (op == "QUIT" || op == "EXIT") {
+                // Process any remaining pending interrupts before exiting
+                bool old_int_state = interrupt_enabled;
+                interrupt_enabled = true;
+                while (!pending_interrupts.empty()) {
+                    u8 int_num = pending_interrupts.front();
+                    pending_interrupts.pop();
+                    interrupt_enabled = true;
+                    handle_interrupt(int_num, pc);
+                }
+                interrupt_enabled = old_int_state;
                 cout << "Program exited via QUIT.\n";
                 return;
             }
 
             pc++; 
-
-            if (interrupt_enabled && !pending_interrupts.empty()) {
-                u8 int_num = pending_interrupts.front();
-                pending_interrupts.pop();
-                handle_interrupt(int_num, pc);
-            }
 
             if (op == "NOP") {
                 // Literally do nothing
@@ -493,6 +538,8 @@ struct CPU {
                 // Pop return address
                 u16 ret_addr = mem_read16_at(SP);
                 SP += 2;
+
+                interrupt_depth--;
                 
                 pc = ret_addr;
                 continue;
@@ -542,6 +589,67 @@ struct CPU {
                 else throw runtime_error("TRIGGER: interrupt number must be r8 or immediate");
     
                 trigger_interrupt(int_num);
+                continue;
+            }
+
+            // SETTIMER - Set timer interrupt interval
+            // Syntax: SETTIMER interval_in_cycles interrupt_number
+            if (op == "SETTIMER") {
+                if (toks.size() < 3) throw runtime_error("SETTIMER needs 2 arguments: interval interrupt_num");
+                
+                string interval_str = toks[1];
+                string int_str = toks[2];
+    
+                // Parse interval
+                if (is_r16(interval_str)) timer_interval = regs16[get_r16_index(interval_str)];
+                else if (is_number(interval_str)) timer_interval = parse_int(interval_str);
+                else throw runtime_error("SETTIMER: interval must be r16 or immediate");
+                
+                // Parse interrupt number
+                u8 int_num = 0;
+                if (is_r8(int_str)) int_num = regs8[get_r8_index(int_str)];
+                else if (is_number(int_str)) int_num = (u8)parse_int(int_str);
+                else throw runtime_error("SETTIMER: interrupt number must be r8 or immediate");
+                
+                if (timer_interval > 0) {
+                    timer_enabled = true;
+                    timer_counter = 0;
+                    // Store which interrupt to trigger (reuse interrupt_vector_table for config)
+                    interrupt_vector_table[255] = int_num;  // Use slot 255 for timer config
+                    cout << "Timer enabled: " << timer_interval << " cycles, interrupt " << (int)int_num << "\n";
+                } else {
+                    timer_enabled = false;
+                    cout << "Timer disabled\n";
+                }
+                continue;
+            }
+            
+            // STOPTIMER - Disable timer interrupts
+            if (op == "STOPTIMER") {
+                timer_enabled = false;
+                timer_counter = 0;
+                cout << "Timer stopped\n";
+                continue;
+            }
+            
+            // SCHEDIO - Schedule an I/O operation that will complete after N cycles
+            // Syntax: SCHEDIO cycles interrupt_num
+            // Simulates async I/O (disk read, network packet arrival, etc.)
+            if (op == "SCHEDIO") {
+                if (toks.size() < 3) throw runtime_error("SCHEDIO needs 2 arguments: cycles interrupt_num");
+                
+                u32 cycles = 0;
+                if (is_r16(toks[1])) cycles = regs16[get_r16_index(toks[1])];
+                else if (is_number(toks[1])) cycles = parse_int(toks[1]);
+                else throw runtime_error("SCHEDIO: cycles must be r16 or immediate");
+                
+                u8 int_num = 0;
+                if (is_r8(toks[2])) int_num = regs8[get_r8_index(toks[2])];
+                else if (is_number(toks[2])) int_num = (u8)parse_int(toks[2]);
+                else throw runtime_error("SCHEDIO: interrupt number must be r8 or immediate");
+                
+                pending_io.push_back({int_num, cycles});
+                cout << "I/O scheduled: " << cycles << " cycles, interrupt " << (int)int_num << "\n";
                 continue;
             }
 
