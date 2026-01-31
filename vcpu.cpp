@@ -390,6 +390,72 @@ struct CPU {
                 continue;
             }
 
+            // STORE - Store 8-bit value to memory
+            // Syntax: STORE src, dest_addr
+            if (op == "STORE") {
+                if (toks.size() < 3) throw runtime_error("STORE needs 2 arguments (value, address)");
+                string src = toks[1];
+                string dest = toks[2];
+                
+                u8 value = 0;
+                // Get source value
+                if (is_r8(src)) {
+                    value = regs8[get_r8_index(src)];
+                } else if (is_number(src)) {
+                    value = (u8)(parse_int(src) & 0xFF);
+                } else {
+                    throw runtime_error("STORE: source must be r8 register or immediate");
+                }
+                
+                // Get destination address
+                u32 addr = 0;
+                if (is_r16(dest)) {
+                    addr = regs16[get_r16_index(dest)];
+                } else if (is_number(dest)) {
+                    addr = parse_int(dest);
+                } else if (is_mem(dest)) {
+                    addr = resolve_address(dest);
+                } else {
+                    throw runtime_error("STORE: destination must be r16, immediate, or memory address");
+                }
+                
+                mem_write8_at(addr, value);
+                continue;
+            }
+            
+            // HSTORE - Store 16-bit value to memory
+            // Syntax: HSTORE src, dest_addr
+            if (op == "HSTORE") {
+                if (toks.size() < 3) throw runtime_error("HSTORE needs 2 arguments (value, address)");
+                string src = toks[1];
+                string dest = toks[2];
+                
+                u16 value = 0;
+                // Get source value
+                if (is_r16(src)) {
+                    value = regs16[get_r16_index(src)];
+                } else if (is_number(src)) {
+                    value = (u16)(parse_int(src) & 0xFFFF);
+                } else {
+                    throw runtime_error("HSTORE: source must be r16 register or immediate");
+                }
+                
+                // Get destination address
+                u32 addr = 0;
+                if (is_r16(dest)) {
+                    addr = regs16[get_r16_index(dest)];
+                } else if (is_number(dest)) {
+                    addr = parse_int(dest);
+                } else if (is_mem(dest)) {
+                    addr = resolve_address(dest);
+                } else {
+                    throw runtime_error("HSTORE: destination must be r16, immediate, or memory address");
+                }
+                
+                mem_write16_at(addr, value);
+                continue;
+            }
+
             // float-point instructions
             if (op == "FMOV") {
                 if (toks.size() < 3) throw runtime_error("FMOV needs 2 arguments");
@@ -2464,7 +2530,13 @@ struct CPU {
                     is16_src = true;
                 } else if (is_mem(src)) {
                     u32 addr = resolve_address(src);
-                    val = mem_read8_at(addr);
+                    // Check if destination is 16-bit to determine read size
+                    if (is_r16(dst)) {
+                        val = mem_read16_at(addr);
+                        is16_src = true;
+                    } else {
+                        val = mem_read8_at(addr);
+                    }
                 } else if (is_number(src)) {
                     val = parse_int(src);
                 } else {

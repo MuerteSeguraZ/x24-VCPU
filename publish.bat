@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=massive update nº2"
+if "%MSG%"=="" set "MSG=fix mov to handle 16-bit values and added STORE and HSTORE"
 
 git status
 
