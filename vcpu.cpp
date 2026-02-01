@@ -56,6 +56,13 @@ static vector<string> split_tok(const string &line) {
 }
 
 struct CPU {
+    // statics
+    static const u32 PAGE_SIZE = 256;
+    static const u32 PAGE_MASK = 0xFF;
+    static const u32 PAGE_SHIFT = 8;
+    static const u32 TOTAL_PAGES = 256;
+    static const int TLB_SIZE = 16;
+
     // registers
     array<u8, 32> regs8{};
     array<u8, 256> interrupt_priorities{};
@@ -63,13 +70,17 @@ struct CPU {
     array<u16, 32> regs16{};
     array<float, 32> regs_f32{};
     array<double, 32> regs_f64{};
+    array<bool, TOTAL_PAGES> physical_pages_used;
     array<u32, 256> interrupt_vector_table{};
     queue<pair<u8, u8>> pending_interrupts;
     u8 current_priority = 0;
     u8 current_privilege_level = 0;
+    u8 page_fault_error_code = 0;
     u32 SP = 0; 
     u32 timer_counter = 0;
     u32 timer_interval = 0;
+    u32 page_directory_base = 0;
+    u32 page_fault_address = 0;
     int interrupt_depth = 0;
     
     // memory
@@ -79,6 +90,12 @@ struct CPU {
     size_t stack_size = 1024;
 
     // flags
+    bool interrupt_enabled = true;
+    bool trap_flag = false;
+    bool timer_enabled = false;
+    bool in_interrupt_handler = false;
+    bool supervisor_mode = true;
+    bool paging_enabled = false;
     bool ZF = false;  // Zero Flag
     bool SF = false;  // Sign Flag
     bool CF = false;  // Carry Flag
@@ -88,11 +105,6 @@ struct CPU {
     bool FE = false;
     bool FG = false;
     bool FL = false;
-    bool interrupt_enabled = true;
-    bool trap_flag = false;
-    bool timer_enabled = false;
-    bool in_interrupt_handler = false;
-    bool supervisor_mode = true;
 
     // memory layout
     size_t program_region = 0;
@@ -118,10 +130,51 @@ struct CPU {
         bool executable;
     };
 
+    struct PageTableEntry {
+        u32 physical_page : 24;
+        u8 present : 1;
+        u8 writable : 1;
+        u8 user : 1;
+        u8 accessed : 1;
+        u8 dirty : 1;
+        u8 reserved : 3;
+    };
+
+    struct PageDirectoryEntry {
+        u32 page_table_addr : 24;
+        u8 present : 1;
+        u8 writable : 1;
+        u8 user : 1;
+        u8 accessed : 1;
+        u8 reserved : 4;
+    };
+
+    struct TLBEntry {
+        u32 virtual_page;
+        u32 physical_page;
+        bool present;
+        bool writable;
+        bool user;
+        bool valid;
+    };
+
+    struct Process {
+        u32 page_directory;
+        u8 privilege_level;
+        u32 base_address;
+        u32 size;
+        bool active;
+        string name;
+    };
+
+    array<Process, 8> processes;
+    array<TLBEntry, TLB_SIZE> tlb;
     array<MemorySegment, 8> segments;
     u8 current_code_segment = 0;
+    u8 current_process = 0;
     u8 current_data_segment = 0;
     bool protection_enabled = 0;
+    int tlb_next = 0;
     vector<PendingIO> pending_io;
 
     void set_flags(int a, int b) {
@@ -210,6 +263,154 @@ struct CPU {
             throw runtime_error("Privilege violation: CPL=" + to_string(current_privilege_level) +
                               " > segment DPL=" + to_string(seg.privilege_level));
         }
+    }
+
+    u32 allocate_physical_page() {
+        for (u32 i = 0; i < TOTAL_PAGES; i++) {
+            if (!physical_pages_used[i]) {
+                physical_pages_used[i] = true;
+                return i;
+            }
+        }
+        throw runtime_error("out of physical memory");
+    }
+
+    void free_physical_page(u32 page_num) {
+        if (page_num < TOTAL_PAGES) {
+            physical_pages_used[page_num] = false;
+        }
+    }
+
+    void tlb_flush() {
+        for (auto& entry : tlb) {
+            entry.valid = false;
+        }
+    }
+
+    void tlb_flush_page(u32 virtual_page) {
+        for (auto& entry : tlb) {
+            if (entry.valid && entry.virtual_page == virtual_page) {
+                entry.valid = false;
+            }
+        }
+    }
+
+    void tlb_insert(u32 virtual_page, u32 physical_page, bool writable, bool user) {
+        tlb[tlb_next].virtual_page = virtual_page;
+        tlb[tlb_next].physical_page = physical_page;
+        tlb[tlb_next].writable = writable;
+        tlb[tlb_next].user = user;
+        tlb[tlb_next].present = true;
+        tlb[tlb_next].valid = true;
+
+        tlb_next = (tlb_next + 1) % TLB_SIZE;
+    }
+
+    TLBEntry* tlb_lookup(u32 virtual_page) {
+        for (auto& entry : tlb) {
+            if (entry.valid && entry.virtual_page == virtual_page) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    // Update the translate_address function:
+    u32 translate_address(u32 virtual_addr, bool is_write, bool& writable, bool& user_accessible) {
+        if (!paging_enabled) {
+            writable = true;
+            user_accessible = true;
+            return virtual_addr;
+        }
+        
+        u32 virtual_page = virtual_addr >> PAGE_SHIFT;
+        u32 offset = virtual_addr & PAGE_MASK;
+        
+        // Check TLB first
+        TLBEntry* tlb_entry = tlb_lookup(virtual_page);
+        if (tlb_entry) {
+            writable = tlb_entry->writable;
+            user_accessible = tlb_entry->user;
+            
+            // Check permissions
+            if (is_write && !writable) {
+                page_fault_address = virtual_addr;
+                page_fault_error_code = 0x02;
+                throw runtime_error("Page fault: write to read-only page at " + to_string(virtual_addr));
+            }
+            
+            if (!user_accessible && current_privilege_level == 3) {
+                page_fault_address = virtual_addr;
+                page_fault_error_code = 0x04;
+                throw runtime_error("Page fault: user access to supervisor page at " + to_string(virtual_addr));
+            }
+            
+            return (tlb_entry->physical_page << PAGE_SHIFT) | offset;
+        }
+        
+        // TLB miss - walk page table (single level)
+        // Each page table entry is 4 bytes
+        u32 pte_addr = page_directory_base + virtual_page * 4;
+        
+        if (pte_addr + 3 >= mem_size) {
+            throw runtime_error("Page table out of bounds");
+        }
+        
+        u32 pte_raw = mem[pte_addr] | 
+                      (mem[pte_addr + 1] << 8) | 
+                      (mem[pte_addr + 2] << 16) | 
+                      (mem[pte_addr + 3] << 24);
+        
+        PageTableEntry pte;
+        pte.present = pte_raw & 0x01;
+        pte.writable = (pte_raw >> 1) & 0x01;
+        pte.user = (pte_raw >> 2) & 0x01;
+        pte.accessed = (pte_raw >> 3) & 0x01;
+        pte.dirty = (pte_raw >> 4) & 0x01;
+        pte.physical_page = (pte_raw >> 8) & 0xFF;
+        
+        if (!pte.present) {
+            page_fault_address = virtual_addr;
+            page_fault_error_code = 0x00;
+            throw runtime_error("Page fault: page not present at " + to_string(virtual_addr));
+        }
+        
+        // Check permissions
+        bool is_writable = pte.writable;
+        bool is_user = pte.user;
+        
+        if (is_write && !is_writable) {
+            page_fault_address = virtual_addr;
+            page_fault_error_code = 0x02;
+            throw runtime_error("Page fault: write to read-only page at " + to_string(virtual_addr));
+        }
+        
+        if (!is_user && current_privilege_level == 3) {
+            page_fault_address = virtual_addr;
+            page_fault_error_code = 0x04;
+            throw runtime_error("Page fault: user access to supervisor page at " + to_string(virtual_addr));
+        }
+        
+        // Set accessed bit (and dirty bit if writing)
+        if (!pte.accessed || (is_write && !pte.dirty)) {
+            pte_raw |= 0x08;  // Set accessed
+            if (is_write) {
+                pte_raw |= 0x10;  // Set dirty
+            }
+            mem[pte_addr] = pte_raw & 0xFF;
+            mem[pte_addr + 1] = (pte_raw >> 8) & 0xFF;
+            mem[pte_addr + 2] = (pte_raw >> 16) & 0xFF;
+            mem[pte_addr + 3] = (pte_raw >> 24) & 0xFF;
+        }
+        
+        // Insert into TLB
+        tlb_insert(virtual_page, pte.physical_page, is_writable, is_user);
+        
+        writable = is_writable;
+        user_accessible = is_user;
+        
+        u32 physical_addr = (pte.physical_page << PAGE_SHIFT) | offset;
+        return physical_addr;
     }
 
     void handle_interrupt(u8 interrupt_num, size_t& pc) {
@@ -485,29 +686,45 @@ struct CPU {
         }
     }
 
-    u8 mem_read8_at(u32 addr) {
-        check_memory_access(addr, false);
-        if (addr >= mem_size) throw runtime_error("memory read8 out of bounds at address " + to_string(addr));
-        return mem[addr];
+    u8 mem_read8_at(u32 virtual_addr) {
+        bool writable, user_accessible;
+        u32 physical_addr = translate_address(virtual_addr, false, writable, user_accessible);
+    
+        if (physical_addr >= mem_size) {
+            throw runtime_error("Physical memory read8 out of bounds at " + to_string(physical_addr));
+        }
+        return mem[physical_addr];
     }
 
-    void mem_write8_at(u32 addr, u8 val) {
-        check_memory_access(addr, true);
-        if (addr >= mem_size) throw runtime_error("memory write8 out of bounds at address " + to_string(addr));
-        mem[addr] = val;
+    void mem_write8_at(u32 virtual_addr, u8 val) {
+        bool writable, user_accessible;
+        u32 physical_addr = translate_address(virtual_addr, true, writable, user_accessible);
+    
+        if (physical_addr >= mem_size) {
+            throw runtime_error("Physical memory write8 out of bounds at " + to_string(physical_addr));
+        }
+        mem[physical_addr] = val;
     }
 
-    u16 mem_read16_at(u32 addr) {
-        check_memory_access(addr, false);
-        if (addr + 1 >= mem_size) throw runtime_error("memory read16 out of bounds at address " + to_string(addr));
-        return (u16)mem[addr] | ((u16)mem[addr + 1] << 8);
+    u16 mem_read16_at(u32 virtual_addr) {
+        bool writable, user_accessible;
+        u32 physical_addr = translate_address(virtual_addr, false, writable, user_accessible);
+    
+        if (physical_addr + 1 >= mem_size) {
+            throw runtime_error("Physical memory read16 out of bounds at " + to_string(physical_addr));
+        }
+        return (u16)mem[physical_addr] | ((u16)mem[physical_addr + 1] << 8);
     }
 
-    void mem_write16_at(u32 addr, u16 val) {
-        check_memory_access(addr, true);
-        if (addr + 1 >= mem_size) throw runtime_error("memory write16 out of bounds at address " + to_string(addr));
-        mem[addr] = (u8)(val & 0xFF);
-        mem[addr + 1] = (u8)((val >> 8) & 0xFF);
+    void mem_write16_at(u32 virtual_addr, u16 val) {
+        bool writable, user_accessible;
+        u32 physical_addr = translate_address(virtual_addr, true, writable, user_accessible);
+    
+        if (physical_addr + 1 >= mem_size) {
+            throw runtime_error("Physical memory write16 out of bounds at " + to_string(physical_addr));
+        }
+        mem[physical_addr] = (u8)(val & 0xFF);
+        mem[physical_addr + 1] = (u8)((val >> 8) & 0xFF);
     }
 
 void run() {
@@ -1044,6 +1261,231 @@ void run() {
                 continue;
             }
 
+            if (op == "ENABLEPAGING") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("ENABLEPAGING: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("ENABLEPAGING needs 1 argument");
+                
+                u32 pd_addr = 0;
+                if (is_r16(toks[1])) pd_addr = regs16[get_r16_index(toks[1])];
+                else if (is_r8(toks[1])) pd_addr = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) pd_addr = parse_int(toks[1]);
+                else throw runtime_error("ENABLEPAGING: address must be register or immediate");
+                
+                page_directory_base = pd_addr;
+                paging_enabled = true;
+                tlb_flush();
+                
+                cout << "Paging enabled with directory at 0x" << hex << pd_addr << dec << "\n";
+                continue;
+            }
+
+            if (op == "DISABLEPAGING") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("DISABLEPAGING: requires kernel mode");
+                }
+                
+                paging_enabled = false;
+                page_directory_base = 0;
+                tlb_flush();
+                
+                cout << "Paging disabled\n";
+                continue;
+            }
+
+            if (op == "SETPD") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SETPD: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("SETPD needs 1 argument");
+    
+                u32 pd_addr = 0;
+                if (is_r16(toks[1])) pd_addr = regs16[get_r16_index(toks[1])];
+                else if (is_r8(toks[1])) pd_addr = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) pd_addr = parse_int(toks[1]);
+                else throw runtime_error("SETPD: address must be register or immediate");
+    
+                page_directory_base = pd_addr;
+                tlb_flush();
+    
+                cout << "Page directory base set to 0x" << hex << pd_addr << dec << "\n";
+                continue;
+            }
+
+            if (op == "INVLPG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("INVLPG: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("INVLPG needs 1 argument");
+    
+                u32 vaddr = 0;
+                if (is_r16(toks[1])) vaddr = regs16[get_r16_index(toks[1])];
+                else if (is_r8(toks[1])) vaddr = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) vaddr = parse_int(toks[1]);
+                else throw runtime_error("INVLPG: address must be register or immediate");
+    
+                u32 vpage = vaddr >> PAGE_SHIFT;
+                tlb_flush_page(vpage);
+    
+                continue;
+            }
+
+// MAPPG - Map a virtual page to physical page (kernel only)
+            // Syntax: MAPPG virtual_page physical_page flags
+            // flags: bit 0=present, bit 1=writable, bit 2=user
+            if (op == "MAPPG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("MAPPG: requires kernel mode");
+                }
+                if (toks.size() < 4) throw runtime_error("MAPPG needs 3 arguments");
+    
+                // Get virtual page number
+                u32 vpage = 0;
+                if (is_r8(toks[1])) vpage = regs8[get_r8_index(toks[1])];
+                else if (is_r16(toks[1])) vpage = regs16[get_r16_index(toks[1])];
+                else if (is_number(toks[1])) vpage = parse_int(toks[1]);
+                else throw runtime_error("MAPPG: virtual_page must be register or immediate");
+    
+                // Get physical page number
+                u32 ppage = 0;
+                if (is_r8(toks[2])) ppage = regs8[get_r8_index(toks[2])];
+                else if (is_r16(toks[2])) ppage = regs16[get_r16_index(toks[2])];
+                else if (is_number(toks[2])) ppage = parse_int(toks[2]);
+                else throw runtime_error("MAPPG: physical_page must be register or immediate");
+                
+                // Get flags
+                u8 flags = 0;
+                if (is_r8(toks[3])) flags = regs8[get_r8_index(toks[3])];
+                else if (is_number(toks[3])) flags = (u8)parse_int(toks[3]);
+                else throw runtime_error("MAPPG: flags must be register or immediate");
+                
+                // Temporarily disable paging to access page table
+                bool was_paging = paging_enabled;
+                paging_enabled = false;
+                
+                // Single-level page table: each entry is 4 bytes
+                u32 pte_addr = page_directory_base + vpage * 4;
+                
+                if (pte_addr + 3 >= mem_size) {
+                    throw runtime_error("Page table entry out of bounds");
+                }
+                
+                // Write page table entry
+                u32 pte_raw = (ppage << 8) | flags;
+                mem[pte_addr] = pte_raw & 0xFF;
+                mem[pte_addr + 1] = (pte_raw >> 8) & 0xFF;
+                mem[pte_addr + 2] = (pte_raw >> 16) & 0xFF;
+                mem[pte_addr + 3] = (pte_raw >> 24) & 0xFF;
+                
+                paging_enabled = was_paging;
+                tlb_flush_page(vpage);
+                
+                cout << "Mapped virtual page " << vpage << " -> physical page " << ppage 
+                     << " (flags=" << (int)flags << ")\n";
+                continue;
+            }
+
+            // UNMAPPG - Unmap a virtual page
+            if (op == "UNMAPPG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("UNMAPPG: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("UNMAPPG needs 1 argument");
+                
+                u32 vpage = 0;
+                if (is_r8(toks[1])) vpage = regs8[get_r8_index(toks[1])];
+                else if (is_r16(toks[1])) vpage = regs16[get_r16_index(toks[1])];
+                else if (is_number(toks[1])) vpage = parse_int(toks[1]);
+                else throw runtime_error("UNMAPPG: virtual_page must be register or immediate");
+                
+                bool was_paging = paging_enabled;
+                paging_enabled = false;
+                
+                u32 pte_addr = page_directory_base + vpage * 4;
+                
+                if (pte_addr + 3 < mem_size) {
+                    // Clear the PTE (mark as not present)
+                    mem[pte_addr] = 0;
+                    mem[pte_addr + 1] = 0;
+                    mem[pte_addr + 2] = 0;
+                    mem[pte_addr + 3] = 0;
+                }
+                
+                paging_enabled = was_paging;
+                tlb_flush_page(vpage);
+                
+                cout << "Unmapped virtual page " << vpage << "\n";
+                continue;
+            }
+            
+            // CREATEPROC - Create a new process with isolated address space
+            // Syntax: CREATEPROC process_id name
+            if (op == "CREATEPROC") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("CREATEPROC: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("CREATEPROC needs 2 arguments");
+                
+                u8 pid = 0;
+                if (is_r8(toks[1])) pid = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) pid = (u8)parse_int(toks[1]);
+                else throw runtime_error("CREATEPROC: process_id must be register or immediate");
+    
+                if (pid >= 8) throw runtime_error("CREATEPROC: invalid process ID");
+                
+                // Allocate page table (256 entries * 4 bytes = 1024 bytes = 4 pages)
+                u32 pt_page = allocate_physical_page();
+                u32 pt_addr = pt_page << PAGE_SHIFT;
+                
+                // Allocate 3 more pages for full page table
+                allocate_physical_page();
+                allocate_physical_page();
+                allocate_physical_page();
+                
+                // Clear page table
+                bool was_paging = paging_enabled;
+                paging_enabled = false;
+                for (u32 i = 0; i < 1024; i++) {
+                    mem[pt_addr + i] = 0;
+                }
+                paging_enabled = was_paging;
+                
+                processes[pid].page_directory = pt_addr;
+                processes[pid].privilege_level = 3;  // User mode
+                processes[pid].active = true;
+                processes[pid].name = toks[2];
+    
+                cout << "Created process " << (int)pid << " (" << processes[pid].name 
+                     << ") with page table at 0x" << hex << pt_addr << dec << "\n";
+                continue;
+            }
+            
+            // SWITCHPROC - Switch to another process
+            if (op == "SWITCHPROC") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SWITCHPROC: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("SWITCHPROC needs 1 argument");
+                
+                u8 pid = 0;
+                if (is_r8(toks[1])) pid = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) pid = (u8)parse_int(toks[1]);
+                else throw runtime_error("SWITCHPROC: process_id must be register or immediate");
+                
+                if (pid >= 8 || !processes[pid].active) {
+                    throw runtime_error("SWITCHPROC: invalid or inactive process");
+                }
+                
+                current_process = pid;
+                page_directory_base = processes[pid].page_directory;
+                tlb_flush();
+                
+                cout << "Switched to process " << (int)pid << " (" 
+                     << processes[pid].name << ")\n";
+                continue;
+            }
+            
             // STORE - Store 8-bit value to memory
             // Syntax: STORE src, dest_addr
             if (op == "STORE") {
@@ -4282,7 +4724,7 @@ void run() {
                 continue;
             }
 
-// CPUID - CPU Identification
+            // CPUID - CPU Identification
             // Syntax: CPUID function_id
             // Returns CPU information based on function_id in various registers
             // Function 0: Vendor string and max function
