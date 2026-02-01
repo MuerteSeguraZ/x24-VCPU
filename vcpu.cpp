@@ -58,11 +58,13 @@ static vector<string> split_tok(const string &line) {
 struct CPU {
     // registers
     array<u8, 32> regs8{};
+    array<u8, 256> interrupt_priorities{};
     array<u16, 32> regs16{};
     array<float, 32> regs_f32{};
     array<double, 32> regs_f64{};
     array<u32, 256> interrupt_vector_table{};
-    queue<u8> pending_interrupts;
+    queue<pair<u8, u8>> pending_interrupts;
+    u8 current_priority = 0;
     u32 SP = 0; 
     u32 timer_counter = 0;
     u32 timer_interval = 0;
@@ -162,53 +164,72 @@ struct CPU {
     }
 
     void trigger_interrupt(u8 interrupt_num) {
-    pending_interrupts.push(interrupt_num);
-}
+        u8 priority = interrupt_priorities[interrupt_num];
+        pending_interrupts.push(std::make_pair(interrupt_num, priority));
+    }
 
     void handle_interrupt(u8 interrupt_num, size_t& pc) {
-        if (!interrupt_enabled && interrupt_num < 32) {
-            // Non-maskable interrupts (0-31) can't be disabled
-            // For simplicity, we'll make interrupts 0-31 non-maskable
-        } else if (!interrupt_enabled) {
-            return;  // Interrupts disabled
+        u8 priority = interrupt_priorities[interrupt_num];
+
+            // Check if non-maskable or interrupts enabled
+            if (!interrupt_enabled && priority < 16) {
+                return;  // Maskable interrupts disabled
+            }
+
+            u32 handler_addr = interrupt_vector_table[interrupt_num];
+
+            if (handler_addr == 0) {
+                cout << "WARNING: No handler for interrupt " << (int)interrupt_num << "\n";
+                return;
+            }
+
+            // Push current priority, flags, and return address
+            if (SP < stack_base + 6) throw runtime_error("stack overflow during interrupt");
+
+            // Push return address
+            SP -= 2;
+            mem_write16_at(SP, (u16)pc);
+        
+            // Push flags
+            u16 flags = 0;
+            flags |= (ZF ? (1 << 0) : 0);
+            flags |= (SF ? (1 << 1) : 0);
+            flags |= (CF ? (1 << 2) : 0);
+            flags |= (OF ? (1 << 3) : 0);
+            flags |= (interrupt_enabled ? (1 << 4) : 0);
+            flags |= (trap_flag ? (1 << 5) : 0);
+            SP -= 2;
+            mem_write16_at(SP, flags);
+            
+            // Push current priority
+            SP -= 1;
+            mem_write8_at(SP, current_priority);
+            
+            // Set new priority
+            u8 old_priority = current_priority;
+            current_priority = priority;
+            
+            cout << "  [INT " << (int)interrupt_num << " @ PRI " << (int)priority 
+                 << " (was " << (int)old_priority << ")]\n";
+            
+            // Only disable interrupts for maskable interrupts
+            // NMIs and higher priority can still interrupt
+            if (priority < 16) {
+                interrupt_enabled = false;  // Disable only for maskable interrupts
+            }
+            // Note: For NMIs (priority >= 16), we leave interrupt_enabled as-is
+            // This allows lower priority maskable interrupts to queue but not fire
+            // while higher priority interrupts can still preempt
+            
+            in_interrupt_handler = true;
+            interrupt_depth++;
+            
+            // Jump to handler
+            if (handler_addr >= program.size()) {
+                throw runtime_error("interrupt handler address out of bounds");
+            }
+            pc = handler_addr;
         }
-    
-        // Get handler address from IVT
-        u32 handler_addr = interrupt_vector_table[interrupt_num];
-    
-        if (handler_addr == 0) {
-            cout << "WARNING: No handler for interrupt " << (int)interrupt_num << "\n";
-            return;
-        }   
-    
-        // Push flags (simplified - just store key flags)
-        u16 flags = 0;
-        flags |= (ZF ? (1 << 0) : 0);
-        flags |= (SF ? (1 << 1) : 0);
-        flags |= (CF ? (1 << 2) : 0);
-        flags |= (OF ? (1 << 3) : 0);
-        flags |= (interrupt_enabled ? (1 << 4) : 0);
-        flags |= (trap_flag ? (1 << 5) : 0);
-        
-        if (SP < stack_base + 4) throw runtime_error("stack overflow during interrupt");
-        
-        // Push return address and flags (like x86)
-        SP -= 2;
-        mem_write16_at(SP, (u16)pc);  // Return address
-        SP -= 2;
-        mem_write16_at(SP, flags);    // Flags
-        
-        // Disable interrupts during handler (can be re-enabled with STI)
-        interrupt_enabled = false;
-        in_interrupt_handler = true;
-        interrupt_depth++;
-        
-        // Jump to handler
-        if (handler_addr >= program.size()) {
-            throw runtime_error("interrupt handler address out of bounds");
-        }
-        pc = handler_addr;
-    }   
 
     CPU(size_t full_mem = 65536, size_t ram16_sz = 4096, size_t ram8_sz = 256) {
         if (full_mem < ram8_sz + 1) throw runtime_error("memory too small");
@@ -425,53 +446,96 @@ struct CPU {
         mem[addr + 1] = (u8)((val >> 8) & 0xFF);
     }
 
-    void run() {
-        preprocess_labels();
-        size_t pc = 0;
-        
-        while (pc < program.size()) {
-            while (interrupt_enabled && !pending_interrupts.empty()) {
-                u8 int_num = pending_interrupts.front();
+void run() {
+    preprocess_labels();
+    size_t pc = 0;
+    
+    while (pc < program.size()) {
+        // Process all pending interrupts that can fire NOW
+        bool processed_interrupt = true;
+        while (processed_interrupt && !pending_interrupts.empty()) {
+            processed_interrupt = false;
+            
+            // Find highest priority pending interrupt that can fire
+            u8 highest_pri = 0;
+            u8 highest_int = 0;
+            bool found = false;
+            
+            // Scan queue for highest priority interrupt
+            queue<pair<u8, u8>> remaining;
+            
+            while (!pending_interrupts.empty()) {
+                pair<u8, u8> int_pair = pending_interrupts.front();
                 pending_interrupts.pop();
-                handle_interrupt(int_num, pc);
-            }
-
-            string line = trim(program[pc]);
-
-            if (line.empty() || line[0] == '#' || line.back() == ':') {
-                pc++;
-                continue;
-            }
-
-            // Only increment timer when NOT in interrupt handler
-            if (interrupt_depth == 0 && timer_enabled && timer_interval > 0) {
-                timer_counter++;
-                if (timer_counter >= timer_interval) {
-                    timer_counter = 0;
-                    u8 timer_int = (u8)interrupt_vector_table[255];
-                    trigger_interrupt(timer_int);
-                }
-            }
-
-            if (interrupt_depth == 0) {
-                for (size_t i = 0; i < pending_io.size(); ) {
-                    pending_io[i].cycles_remaining--;
-                    if (pending_io[i].cycles_remaining == 0) {
-                        trigger_interrupt(pending_io[i].interrupt_num);
-                        pending_io.erase(pending_io.begin() + i);
-                    } else {
-                        i++;
+                
+                u8 int_num = int_pair.first;
+                u8 pri = int_pair.second;
+                
+                // Check if this interrupt can fire
+                bool is_nmi = (pri >= 16);  // Priorities 16-31 are NMI
+                bool can_interrupt = is_nmi || (interrupt_enabled && pri > current_priority);
+                
+                if (can_interrupt && (!found || pri > highest_pri)) {
+                    // Found a higher priority interrupt
+                    if (found) {
+                        // Put previous candidate back
+                        remaining.push(std::make_pair(highest_int, highest_pri));
                     }
+                    highest_int = int_num;
+                    highest_pri = pri;
+                    found = true;
+                } else {
+                    // Can't fire yet, keep in queue
+                    remaining.push(std::make_pair(int_num, pri));
                 }
             }
-
-            auto toks = split_tok(line);
-            if (toks.empty()) {
-                pc++;
-                continue;
+            
+            // Restore remaining interrupts
+            pending_interrupts = remaining;
+            
+            // Fire the highest priority interrupt if found
+            if (found) {
+                handle_interrupt(highest_int, pc);
+                processed_interrupt = true;  // Check again for more interrupts
             }
+        }
 
-            string op = toks[0];
+        string line = trim(program[pc]);
+
+        if (line.empty() || line[0] == '#' || line.back() == ':') {
+            pc++;
+            continue;
+        }
+
+        // Only increment timer when NOT in interrupt handler
+        if (interrupt_depth == 0 && timer_enabled && timer_interval > 0) {
+            timer_counter++;
+            if (timer_counter >= timer_interval) {
+                timer_counter = 0;
+                u8 timer_int = (u8)interrupt_vector_table[255];
+                trigger_interrupt(timer_int);
+            }
+        }
+
+        if (interrupt_depth == 0) {
+            for (size_t i = 0; i < pending_io.size(); ) {
+                pending_io[i].cycles_remaining--;
+                if (pending_io[i].cycles_remaining == 0) {
+                    trigger_interrupt(pending_io[i].interrupt_num);
+                    pending_io.erase(pending_io.begin() + i);
+                } else {
+                    i++;
+                }
+            }
+        }
+
+        auto toks = split_tok(line);
+        if (toks.empty()) {
+            pc++;
+            continue;
+        }
+
+        string op = toks[0];
 
             // QUIT / EXIT
             if (op == "QUIT" || op == "EXIT") {
@@ -479,10 +543,49 @@ struct CPU {
                 bool old_int_state = interrupt_enabled;
                 interrupt_enabled = true;
                 while (!pending_interrupts.empty()) {
-                    u8 int_num = pending_interrupts.front();
-                    pending_interrupts.pop();
-                    interrupt_enabled = true;
-                    handle_interrupt(int_num, pc);
+                    // Find highest priority pending interrupt
+                    u8 highest_pri = 0;
+                    u8 highest_int = 0;
+                    bool found = false;
+    
+                    // Scan queue for highest priority interrupt
+                    queue<pair<u8, u8>> remaining;
+    
+                    while (!pending_interrupts.empty()) {
+                        pair<u8, u8> int_pair = pending_interrupts.front();
+                        pending_interrupts.pop();
+        
+                        u8 int_num = int_pair.first;
+                        u8 pri = int_pair.second;
+                        
+                        // Check if this interrupt can fire
+                        bool is_nmi = (pri >= 16);  // Priorities 16-31 are NMI
+                        bool can_interrupt = is_nmi || (pri > current_priority);
+                        
+                        if (can_interrupt && (!found || pri > highest_pri)) {
+                            // Found a higher priority interrupt
+                            if (found) {
+                                // Put previous candidate back
+                                remaining.push(std::make_pair(highest_int, highest_pri));
+                            }
+                            highest_int = int_num;
+                            highest_pri = pri;
+                            found = true;
+                        } else {
+                            // Can't fire yet, keep in queue
+                            remaining.push(std::make_pair(int_num, pri));
+                        }
+                    }
+                    
+                    // Restore remaining interrupts
+                    pending_interrupts = remaining;
+                    
+                    // Fire the highest priority interrupt if found
+                    if (found && (interrupt_enabled || highest_pri >= 16)) {
+                        handle_interrupt(highest_int, pc);
+                    } else {
+                        break;  // No interrupt can fire right now
+                    }
                 }
                 interrupt_enabled = old_int_state;
                 cout << "Program exited via QUIT.\n";
@@ -521,7 +624,11 @@ struct CPU {
             }
 
             if (op == "IRET") {
-                if (SP > stack_base + stack_size - 4) throw runtime_error("stack underflow during IRET");
+                if (SP > stack_base + stack_size - 5) throw runtime_error("stack underflow during IRET");
+    
+                // Pop current priority
+                u8 old_priority = mem_read8_at(SP);
+                SP += 1;
     
                 // Pop flags
                 u16 flags = mem_read16_at(SP);
@@ -534,13 +641,16 @@ struct CPU {
                 OF = (flags & (1 << 3)) != 0;
                 interrupt_enabled = (flags & (1 << 4)) != 0;
                 trap_flag = (flags & (1 << 5)) != 0;
-                
-                // Pop return address
+    
+               // Pop return address
                 u16 ret_addr = mem_read16_at(SP);
                 SP += 2;
-
+    
+                current_priority = old_priority;  // Restore old priority
                 interrupt_depth--;
-                
+    
+                cout << "  [IRET: restored priority " << (int)old_priority << "]\n";
+    
                 pc = ret_addr;
                 continue;
             }
@@ -549,9 +659,9 @@ struct CPU {
                 // Real HLT: Stop execution until an interrupt occurs
                 // Process any pending interrupt to wake from halt
                 if (!pending_interrupts.empty()) {
-                    u8 int_num = pending_interrupts.front();
+                    pair<u8, u8> int_pair = pending_interrupts.front();
                     pending_interrupts.pop();
-                    handle_interrupt(int_num, pc);
+                    handle_interrupt(int_pair.first, pc);
                 } else {
                     // No interrupts - CPU stays halted (program ends)
                     cout << "CPU halted. No interrupts available.\n";
@@ -650,6 +760,27 @@ struct CPU {
                 
                 pending_io.push_back({int_num, cycles});
                 cout << "I/O scheduled: " << cycles << " cycles, interrupt " << (int)int_num << "\n";
+                continue;
+            }
+
+            if  (op == "SETPRI") {
+                if (toks.size() < 3) throw runtime_error("SETPRI needs 2 arguments: interrupt_number priority");
+                string int_str = toks[1], pri_str = toks[2];
+    
+                u8 int_num = 0;
+                if (is_r8(int_str)) int_num = regs8[get_r8_index(int_str)];
+                else if (is_number(int_str)) int_num = (u8)parse_int(int_str);
+                else throw runtime_error("SETPRI: interrupt number must be r8 or immediate");
+    
+                u8 priority = 0;
+                if (is_r8(pri_str)) priority = regs8[get_r8_index(pri_str)];
+                else if (is_number(pri_str)) priority = (u8)parse_int(pri_str);
+                else throw runtime_error("SETPRI: priority must be r8 or immediate (0-31)");
+    
+                if (priority > 31) priority = 31;  // Clamp to max
+                interrupt_priorities[int_num] = priority;
+    
+                cout << "Set interrupt " << (int)int_num << " priority to " << (int)priority << "\n";
                 continue;
             }
 
