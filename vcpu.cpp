@@ -61,12 +61,15 @@ struct CPU {
     static const u32 PAGE_MASK = 0xFF;
     static const u32 PAGE_SHIFT = 8;
     static const u32 TOTAL_PAGES = 256;
+    static const u32 MAX_PORTS = 65536;
     static const int TLB_SIZE = 16;
 
     // registers
     array<u8, 32> regs8{};
     array<u8, 256> interrupt_priorities{};
     array<u8, 256> interrupt_privilege_levels{};
+    array<u8, MAX_PORTS> io_ports{};
+    array<u8, 8192> io_permission_bitmap{};
     array<u16, 32> regs16{};
     array<float, 32> regs_f32{};
     array<double, 32> regs_f64{};
@@ -76,6 +79,7 @@ struct CPU {
     u8 current_priority = 0;
     u8 current_privilege_level = 0;
     u8 page_fault_error_code = 0;
+    u8 io_privilege_level = 0;
     u32 SP = 0; 
     u32 timer_counter = 0;
     u32 timer_interval = 0;
@@ -96,6 +100,7 @@ struct CPU {
     bool in_interrupt_handler = false;
     bool supervisor_mode = true;
     bool paging_enabled = false;
+    bool io_bitmap_enabled = false;
     bool ZF = false;  // Zero Flag
     bool SF = false;  // Sign Flag
     bool CF = false;  // Carry Flag
@@ -411,6 +416,25 @@ struct CPU {
         
         u32 physical_addr = (pte.physical_page << PAGE_SHIFT) | offset;
         return physical_addr;
+    }
+
+    void check_io_permission(u16 port) {
+        if (current_privilege_level > io_privilege_level) {
+            if (io_bitmap_enabled) {
+                u32 byte_index = port / 8;
+                u8 bit_index = port % 8;
+
+                if (io_permission_bitmap[byte_index] & (1 << bit_index)) {
+                    throw runtime_error("I/O permission violation: port " +
+                                        to_string(port) + " at CPL " +
+                                        to_string(current_privilege_level));
+                }
+            } else {
+                throw runtime_error("I/O permission violation: port " +
+                                    to_string(port) + " requires CPL <= " +
+                                    to_string(io_privilege_level));
+            }
+        }
     }
 
     void handle_interrupt(u8 interrupt_num, size_t& pc) {
@@ -1483,6 +1507,192 @@ void run() {
                 
                 cout << "Switched to process " << (int)pid << " (" 
                      << processes[pid].name << ")\n";
+                continue;
+            }
+
+            if (op == "IN") {
+                if (toks.size() < 3) throw runtime_error("IN needs 2 arguments");
+                string port_str = toks[1], dst = toks[2];
+    
+                u16 port = 0;
+                if (is_r8(port_str)) port = regs8[get_r8_index(port_str)];
+                else if (is_r16(port_str)) port = regs16[get_r16_index(port_str)];
+                else if (is_number(port_str)) port = (u16)parse_int(port_str);
+                else throw runtime_error("IN: port must be register or immediate");
+    
+                // Check permission
+                check_io_permission(port);
+    
+                // Read from port
+                u8 value = io_ports[port];
+    
+                // Store in destination
+                if (is_r8(dst)) {
+                    regs8[get_r8_index(dst)] = value;
+                } else if (is_r16(dst)) {
+                    regs16[get_r16_index(dst)] = value;
+                } else {
+                    throw runtime_error("IN: destination must be register");
+                }
+                
+                cout << "IN: Read 0x" << hex << (int)value << " from port 0x" 
+                     << port << dec << "\n";
+                continue;
+            }
+
+            if (op == "OUT") {
+                if (toks.size() < 3) throw runtime_error("OUT needs 2 arguments");
+                string value_str = toks[1], port_str = toks[2];
+    
+                u16 port = 0;
+                if (is_r8(port_str)) port = regs8[get_r8_index(port_str)];
+                else if (is_r16(port_str)) port = regs16[get_r16_index(port_str)];
+                else if (is_number(port_str)) port = (u16)parse_int(port_str);
+                else throw runtime_error("OUT: port must be register or immediate");
+    
+                u8 value = 0;
+                if (is_r8(value_str)) value = regs8[get_r8_index(value_str)];
+                else if (is_number(value_str)) value = (u8)parse_int(value_str);
+                else throw runtime_error("OUT: value must be r8 or immediate");
+                
+                // Check permission
+                check_io_permission(port);
+                
+                // Write to port
+                io_ports[port] = value;
+                
+                cout << "OUT: Wrote 0x" << hex << (int)value << " to port 0x" 
+                     << port << dec << "\n";
+                continue;
+            }
+
+            if (op == "INW") {
+                if (toks.size() < 3) throw runtime_error("INW needs 2 arguments");
+                string port_str = toks[1], dst = toks[2];
+    
+                u16 port = 0;
+                if (is_r8(port_str)) port = regs8[get_r8_index(port_str)];
+                else if (is_r16(port_str)) port = regs16[get_r16_index(port_str)];
+                else if (is_number(port_str)) port = (u16)parse_int(port_str);
+                else throw runtime_error("INW: port must be register or immediate");
+    
+                // Check permission for both bytes
+                check_io_permission(port);
+                check_io_permission(port + 1);
+                
+                // Read 16-bit value (little-endian)
+                u16 value = io_ports[port] | ((u16)io_ports[port + 1] << 8);
+                
+                // Store in destination
+                if (!is_r16(dst)) throw runtime_error("INW: destination must be r16");
+                regs16[get_r16_index(dst)] = value;
+                
+                cout << "INW: Read 0x" << hex << value << " from port 0x" 
+                     << port << dec << "\n";
+                continue;
+            }
+
+            if (op == "OUTW") {
+                if (toks.size() < 3) throw runtime_error("OUTW needs 2 arguments");
+                string value_str = toks[1], port_str = toks[2];
+    
+                u16 port = 0;
+                if (is_r8(port_str)) port = regs8[get_r8_index(port_str)];
+                else if (is_r16(port_str)) port = regs16[get_r16_index(port_str)];
+                else if (is_number(port_str)) port = (u16)parse_int(port_str);
+                else throw runtime_error("OUTW: port must be register or immediate");
+    
+                u16 value = 0;
+                if (is_r16(value_str)) value = regs16[get_r16_index(value_str)];
+                else if (is_number(value_str)) value = (u16)parse_int(value_str);
+                else throw runtime_error("OUTW: value must be r16 or immediate");
+                
+                // Check permission for both bytes
+                check_io_permission(port);
+                check_io_permission(port + 1);
+                
+                // Write 16-bit value (little-endian)
+                io_ports[port] = value & 0xFF;
+                io_ports[port + 1] = (value >> 8) & 0xFF;
+                
+                cout << "OUTW: Wrote 0x" << hex << value << " to port 0x" 
+                     << port << dec << "\n";
+                continue;
+            }
+
+            if (op == "SETIOPL") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SETIOPL: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 2) throw runtime_error("SETIOPL needs 1 argument");
+    
+                u8 new_iopl = 0;
+                if (is_r8(toks[1])) new_iopl = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) new_iopl = (u8)parse_int(toks[1]);
+                else throw runtime_error("SETIOPL: argument must be r8 or immediate");
+                
+                if (new_iopl > 3) new_iopl = 3;
+                io_privilege_level = new_iopl;
+                
+                cout << "I/O privilege level set to " << (int)new_iopl << "\n";
+                continue;
+            }
+
+            if (op == "IOALLOW") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("IOALLOW: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 2) throw runtime_error("IOALLOW needs 1 argument");
+                
+                u16 port = 0;
+                if (is_r8(toks[1])) port = regs8[get_r8_index(toks[1])];
+                else if (is_r16(toks[1])) port = regs16[get_r16_index(toks[1])];
+                else if (is_number(toks[1])) port = (u16)parse_int(toks[1]);
+                else throw runtime_error("IOALLOW: port must be register or immediate");
+                
+                u32 byte_index = port / 8;
+                u8 bit_index = port % 8;
+                io_permission_bitmap[byte_index] &= ~(1 << bit_index);  // Clear bit = allow
+                
+                cout << "I/O port 0x" << hex << port << dec << " allowed\n";
+                continue;
+            }
+
+            if (op == "IODENY") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("IODENY: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 2) throw runtime_error("IODENY needs 1 argument");
+    
+                u16 port = 0;
+                if (is_r8(toks[1])) port = regs8[get_r8_index(toks[1])];
+                else if (is_r16(toks[1])) port = regs16[get_r16_index(toks[1])];
+                else if (is_number(toks[1])) port = (u16)parse_int(toks[1]);
+                else throw runtime_error("IODENY: port must be register or immediate");
+    
+                u32 byte_index = port / 8;
+                u8 bit_index = port % 8;
+                io_permission_bitmap[byte_index] |= (1 << bit_index);  // Set bit = deny
+    
+                cout << "I/O port 0x" << hex << port << dec << " denied\n";
+                continue;
+            }
+
+            if (op == "ENABLEIOMAP") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("ENABLEIOMAP: requires kernel mode (CPL=0)");
+                }
+                io_bitmap_enabled = true;
+                cout << "I/O permission bitmap enabled\n";
+                continue;
+            }
+
+            if (op == "DISABLEIOMAP") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("DISABLEIOMAP: requires kernel mode (CPL=0)");
+                }
+                io_bitmap_enabled = false;
+                cout << "I/O permission bitmap disabled\n";
                 continue;
             }
             
