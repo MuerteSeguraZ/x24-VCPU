@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=add interrupt priority levels"
+if "%MSG%"=="" set "MSG=add privilege levels / protection rings"
 
 git status
 

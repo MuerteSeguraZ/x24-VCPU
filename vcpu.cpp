@@ -59,12 +59,14 @@ struct CPU {
     // registers
     array<u8, 32> regs8{};
     array<u8, 256> interrupt_priorities{};
+    array<u8, 256> interrupt_privilege_levels{};
     array<u16, 32> regs16{};
     array<float, 32> regs_f32{};
     array<double, 32> regs_f64{};
     array<u32, 256> interrupt_vector_table{};
     queue<pair<u8, u8>> pending_interrupts;
     u8 current_priority = 0;
+    u8 current_privilege_level = 0;
     u32 SP = 0; 
     u32 timer_counter = 0;
     u32 timer_interval = 0;
@@ -90,6 +92,7 @@ struct CPU {
     bool trap_flag = false;
     bool timer_enabled = false;
     bool in_interrupt_handler = false;
+    bool supervisor_mode = true;
 
     // memory layout
     size_t program_region = 0;
@@ -106,6 +109,19 @@ struct CPU {
         u8 interrupt_num;
         u32 cycles_remaining;
     };
+
+    struct MemorySegment {
+        u32 base;
+        u32 limit;
+        u8 privilege_level;
+        bool writable;
+        bool executable;
+    };
+
+    array<MemorySegment, 8> segments;
+    u8 current_code_segment = 0;
+    u8 current_data_segment = 0;
+    bool protection_enabled = 0;
     vector<PendingIO> pending_io;
 
     void set_flags(int a, int b) {
@@ -164,8 +180,36 @@ struct CPU {
     }
 
     void trigger_interrupt(u8 interrupt_num) {
+        if (protection_enabled &&
+            current_privilege_level > interrupt_privilege_levels[interrupt_num]) {
+                throw runtime_error("Privilege violation: cannot trigger interrupt " +
+                                    to_string(interrupt_num) + " from CPL " +
+                                    to_string(current_privilege_level));
+            }
+
         u8 priority = interrupt_priorities[interrupt_num];
         pending_interrupts.push(std::make_pair(interrupt_num, priority));
+    }
+
+    void check_memory_access(u32 addr, bool is_write) {
+        if (!protection_enabled) return;
+    
+        // Check if address is in current data segment
+        MemorySegment& seg = segments[current_data_segment];
+    
+        if (addr < seg.base || addr >= seg.base + seg.limit) {
+            throw runtime_error("Segment violation: address " + to_string(addr) + 
+                            " outside segment bounds");
+        }
+    
+        if (is_write && !seg.writable) {
+            throw runtime_error("Write protection violation: segment is read-only");
+        }
+        
+        if (current_privilege_level > seg.privilege_level) {
+            throw runtime_error("Privilege violation: CPL=" + to_string(current_privilege_level) +
+                              " > segment DPL=" + to_string(seg.privilege_level));
+        }
     }
 
     void handle_interrupt(u8 interrupt_num, size_t& pc) {
@@ -253,6 +297,22 @@ struct CPU {
         program_size = 0;
         ram16_offset = 0;
         ram16_size = ram16_sz;
+
+        current_privilege_level = 0;
+        supervisor_mode = true;
+
+        for (int i = 0; i < 256; i++) {
+            interrupt_privilege_levels[i] = 0;
+        }
+
+        segments[0].base = 0;
+        segments[0].limit = mem_size;
+        segments[0].privilege_level = 0;
+        segments[0].writable = true;
+        segments[0].executable = true;
+
+        current_code_segment = 0;
+        current_data_segment = 0;
     }
 
     void load_program_lines(const vector<string>& lines) {
@@ -426,21 +486,25 @@ struct CPU {
     }
 
     u8 mem_read8_at(u32 addr) {
+        check_memory_access(addr, false);
         if (addr >= mem_size) throw runtime_error("memory read8 out of bounds at address " + to_string(addr));
         return mem[addr];
     }
 
     void mem_write8_at(u32 addr, u8 val) {
+        check_memory_access(addr, true);
         if (addr >= mem_size) throw runtime_error("memory write8 out of bounds at address " + to_string(addr));
         mem[addr] = val;
     }
 
     u16 mem_read16_at(u32 addr) {
+        check_memory_access(addr, false);
         if (addr + 1 >= mem_size) throw runtime_error("memory read16 out of bounds at address " + to_string(addr));
         return (u16)mem[addr] | ((u16)mem[addr + 1] << 8);
     }
 
     void mem_write16_at(u32 addr, u16 val) {
+        check_memory_access(addr, true);
         if (addr + 1 >= mem_size) throw runtime_error("memory write16 out of bounds at address " + to_string(addr));
         mem[addr] = (u8)(val & 0xFF);
         mem[addr + 1] = (u8)((val >> 8) & 0xFF);
@@ -781,6 +845,202 @@ void run() {
                 interrupt_priorities[int_num] = priority;
     
                 cout << "Set interrupt " << (int)int_num << " priority to " << (int)priority << "\n";
+                continue;
+            }
+
+            if (op == "SETCPL") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SETCPL: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 2) throw runtime_error("SETCPL needs 1 argument");
+    
+                u8 new_cpl = 0;
+                if (is_r8(toks[1])) new_cpl = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) new_cpl = (u8)parse_int(toks[1]);
+                else throw runtime_error("SETCPL: argument must be r8 or immediate");
+                
+                if (new_cpl > 3) new_cpl = 3;
+                current_privilege_level = new_cpl;
+                supervisor_mode = (new_cpl < 3);
+                
+                cout << "CPL changed to " << (int)new_cpl << " (" 
+                     << (supervisor_mode ? "supervisor" : "user") << " mode)\n";
+                continue;
+            }
+
+            // GETCPL - Get Current Privilege Level
+            // Syntax: GETCPL dest_reg
+            if (op == "GETCPL") {
+                if (toks.size() < 2) throw runtime_error("GETCPL needs 1 argument");
+                string dst = toks[1];
+                
+                if (is_r8(dst)) {
+                   regs8[get_r8_index(dst)] = current_privilege_level;
+                } else if (is_r16(dst)) {
+                    regs16[get_r16_index(dst)] = current_privilege_level;
+                } else {
+                    throw runtime_error("GETCPL: destination must be register");
+                }
+                continue;
+            }
+
+            if (op == "SETIPL") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SETIPL: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 3) throw runtime_error("SETIPL needs 2 arguments");
+    
+                u8 int_num = 0;
+                if (is_r8(toks[1])) int_num = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) int_num = (u8)parse_int(toks[1]);
+                else throw runtime_error("SETIPL: interrupt number must be r8 or immediate");
+    
+                u8 req_priv = 0;
+                if (is_r8(toks[2])) req_priv = regs8[get_r8_index(toks[2])];
+                else if (is_number(toks[2])) req_priv = (u8)parse_int(toks[2]);
+                else throw runtime_error("SETIPL: privilege must be r8 or immediate");
+    
+                if (req_priv > 3) req_priv = 3;
+                interrupt_privilege_levels[int_num] = req_priv;
+                
+                cout << "Interrupt " << (int)int_num << " requires CPL <= " << (int)req_priv << "\n";
+                continue;
+            }
+
+            if (op == "SETSEG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SETSEG: requires kernel mode (CPL=0)");
+                }
+                if (toks.size() < 7) throw runtime_error("SETSEG needs 6 arguments");
+    
+                u8 seg_num = (u8)parse_int(toks[1]);
+                if (seg_num >= 8) throw runtime_error("SETSEG: segment number must be 0-7");
+    
+                segments[seg_num].base = parse_int(toks[2]);
+                segments[seg_num].limit = parse_int(toks[3]);
+                segments[seg_num].privilege_level = (u8)parse_int(toks[4]);
+                segments[seg_num].writable = (parse_int(toks[5]) != 0);
+                segments[seg_num].executable = (parse_int(toks[6]) != 0);
+    
+                cout << "Segment " << (int)seg_num << " configured: base=" << segments[seg_num].base
+                     << " limit=" << segments[seg_num].limit << " DPL=" << (int)segments[seg_num].privilege_level << "\n";
+                continue;
+            }
+
+            if (op == "LOADCS") {
+                if (toks.size() < 2) throw runtime_error("LOADCS needs 1 argument");
+    
+                u8 seg_num = 0;
+                if (is_r8(toks[1])) seg_num = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) seg_num = (u8)parse_int(toks[1]);
+                else throw runtime_error("LOADCS: argument must be r8 or immediate");
+    
+                if (seg_num >= 8) throw runtime_error("LOADCS: invalid segment");
+    
+                // Check privilege
+                u8 seg_dpl = segments[seg_num].privilege_level;
+                if (seg_dpl < current_privilege_level) {
+                    throw runtime_error("LOADCS: cannot increase privilege without proper gate");
+                }
+    
+                if (!segments[seg_num].executable) {
+                    throw runtime_error("LOADCS: segment is not executable");
+                }
+                
+                current_code_segment = seg_num;
+                current_privilege_level = seg_dpl;
+                supervisor_mode = (seg_dpl < 3);
+                
+                cout << "Code segment changed to " << (int)seg_num 
+                     << ", CPL now " << (int)current_privilege_level << "\n";
+                continue;
+            }
+
+            if (op == "LOADDS") {
+                if (toks.size() < 2) throw runtime_error("LOADDS needs 1 argument");
+    
+                u8 seg_num = 0;
+                if (is_r8(toks[1])) seg_num = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) seg_num = (u8)parse_int(toks[1]);
+                else throw runtime_error("LOADDS: argument must be r8 or immediate");
+    
+                if (seg_num >= 8) throw runtime_error("LOADDS: invalid segment");
+    
+                current_data_segment = seg_num;
+                cout << "Data segment changed to " << (int)seg_num << "\n";
+                continue;
+            }
+
+            if (op == "SYSCALL") {
+                if (toks.size() < 2) throw runtime_error("SYSCALL needs 1 argument");
+    
+                u8 syscall_num = 0;
+                if (is_r8(toks[1])) syscall_num = regs8[get_r8_index(toks[1])];
+                else if (is_number(toks[1])) syscall_num = (u8)parse_int(toks[1]);
+                else throw runtime_error("SYSCALL: argument must be r8 or immediate");
+    
+                // Save current state
+                if (SP < stack_base + 6) throw runtime_error("stack overflow during syscall");
+    
+                SP -= 2;
+                mem_write16_at(SP, (u16)pc);  // Return address
+    
+                SP -= 1;
+                mem_write8_at(SP, current_privilege_level);  // Save CPL
+                
+                // Switch to kernel mode
+                u8 old_cpl = current_privilege_level;
+               current_privilege_level = 0;
+                supervisor_mode = true;
+                
+                cout << "  [SYSCALL " << (int)syscall_num << ": CPL " 
+                     << (int)old_cpl << " -> 0]\n";
+                
+                // Jump to syscall handler (stored in interrupt vector)
+                if (interrupt_vector_table[syscall_num] != 0) {
+                    pc = interrupt_vector_table[syscall_num];
+                } else {
+                    throw runtime_error("SYSCALL: no handler for syscall " + to_string(syscall_num));
+                }
+                
+                continue;
+            }
+
+            if (op == "SYSRET") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SYSRET: requires kernel mode (CPL=0)");
+                }
+    
+                if (SP + 3 > stack_base + stack_size) throw runtime_error("stack underflow during sysret");
+    
+                // Restore privilege level
+                u8 old_cpl = mem_read8_at(SP);
+                SP += 1;
+                
+                // Restore return address
+                u16 ret_addr = mem_read16_at(SP);
+                SP += 2;
+                
+                current_privilege_level = old_cpl;
+                supervisor_mode = (old_cpl < 3);
+                
+                cout << "  [SYSRET: CPL 0 -> " << (int)old_cpl << "]\n";
+                
+                pc = ret_addr;
+                continue;
+            }
+
+            if (op == "IOPL") {
+                if (toks.size() < 2) throw runtime_error("IOPL needs 1 argument");
+                string dst = toks[1];
+    
+                u8 result = (current_privilege_level <= 1) ? 1 : 0;  // I/O requires CPL <= 1
+    
+                if (is_r8(dst)) {
+                    regs8[get_r8_index(dst)] = result;
+                } else {
+                    throw runtime_error("IOPL: destination must be r8");
+                }
                 continue;
             }
 
