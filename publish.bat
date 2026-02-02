@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=I/O port isolation (IN, OUT, INW, OUTW, SETIOPL, IOALLOW, IODENY, ENABLEIOMAP, DISABLEIOMAP)"
+if "%MSG%"=="" set "MSG=hardware device stuff"
 
 git status
 

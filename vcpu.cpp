@@ -85,6 +85,7 @@ struct CPU {
     u32 timer_interval = 0;
     u32 page_directory_base = 0;
     u32 page_fault_address = 0;
+    u32 hardware_cycle_counter = 0;
     int interrupt_depth = 0;
     
     // memory
@@ -172,9 +173,84 @@ struct CPU {
         string name;
     };
 
+    struct HardwareDevice {
+        bool enabled = false;
+        u8 interrupt_number = 0;
+        u32 cycles_until_interrupt = 0;
+        u32 interrupt_interval = 0;  // 0 = one-shot, >0 = periodic
+        bool interrupt_pending = false;
+        string name;
+    };
+
+    struct SerialPortHW {
+        queue<u8> tx_buffer;
+        queue<u8> rx_buffer;
+        bool tx_interrupt_enabled = false;
+        bool rx_interrupt_enabled = false;
+        u8 interrupt_number = 0;
+        u32 baud_delay = 100;  // Cycles per byte
+        u32 cycles_until_tx_ready = 0;
+        u32 cycles_until_rx_ready = 0;
+        u8 pending_rx_byte = 0;
+        bool has_pending_rx = false;
+    };
+
+    struct KeyboardHW {
+        queue<u8> scancode_queue;
+        bool interrupt_enabled = true;
+        u8 interrupt_number = 1;  // IRQ1
+        u32 typematic_delay = 500;  // Cycles between key repeats
+        u32 cycles_until_next_key = 0;
+        u8 last_scancode = 0;
+    };
+
+    struct PITHW {
+        bool interrupt_enabled = true;
+        u8 interrupt_number = 0;  // IRQ0
+        u32 reload_value = 1193;  // ~1ms at 1.193 MHz
+        u32 current_count = 0;
+        bool counting = true;
+    };
+
+    struct DiskHW {
+        bool interrupt_enabled = true;
+        u8 interrupt_number = 14;  // IRQ14 (primary IDE)
+        bool operation_pending = false;
+        u32 cycles_until_complete = 0;
+        u32 operation_delay = 1000;  // Cycles for disk operation
+        u8 last_status = 0x50;  // DRDY | DSC
+    };
+
+    struct MouseHW {
+        bool interrupt_enabled = false;
+        u8 interrupt_number = 12;  // IRQ12
+        queue<u8> movement_queue;
+        u32 cycles_until_movement = 0;
+        i8 delta_x = 0;
+        i8 delta_y = 0;
+        u8 buttons = 0;
+    };
+
+    struct RTCHW {
+        bool interrupt_enabled = false;
+        u8 interrupt_number = 8;  // IRQ8
+        u32 periodic_interval = 1024;  // Cycles
+        u32 cycles_until_tick = 0;
+        u8 seconds = 0;
+        u8 minutes = 0;
+        u8 hours = 0;
+    };
+
+    RTCHW rtc_hw;
+    MouseHW mouse_hw;
+    DiskHW disk_hw;
+    PITHW pit_hw;
+    KeyboardHW keyboard_hw;
     array<Process, 8> processes;
     array<TLBEntry, TLB_SIZE> tlb;
     array<MemorySegment, 8> segments;
+    array<HardwareDevice, 16> hardware_devices;  // Up to 16 hardware devices
+    array<SerialPortHW, 4> serial_hw;
     u8 current_code_segment = 0;
     u8 current_process = 0;
     u8 current_data_segment = 0;
@@ -433,6 +509,124 @@ struct CPU {
                 throw runtime_error("I/O permission violation: port " +
                                     to_string(port) + " requires CPL <= " +
                                     to_string(io_privilege_level));
+            }
+        }
+    }
+
+    void update_hardware_devices() {
+        hardware_cycle_counter++;
+    
+        // ==================== PIT (Timer) ====================
+        if (pit_hw.counting && pit_hw.interrupt_enabled) {
+            pit_hw.current_count++;
+            if (pit_hw.current_count >= pit_hw.reload_value) {
+                pit_hw.current_count = 0;
+                trigger_interrupt(pit_hw.interrupt_number);
+            }
+        }
+        
+        // ==================== Serial Ports ====================
+        for (int i = 0; i < 4; i++) {
+            SerialPortHW& serial = serial_hw[i];
+            
+            // Transmit ready interrupt
+            if (serial.tx_interrupt_enabled && serial.cycles_until_tx_ready > 0) {
+                serial.cycles_until_tx_ready--;
+                if (serial.cycles_until_tx_ready == 0 && !serial.tx_buffer.empty()) {
+                    // Transmit complete
+                    u8 byte = serial.tx_buffer.front();
+                    serial.tx_buffer.pop();
+                    cout << "[COM" << (i+1) << " TX: '" << (char)byte << "' (0x" 
+                         << hex << (int)byte << dec << ")]\n";
+                    trigger_interrupt(serial.interrupt_number);
+                }
+            }
+            
+            // Receive ready interrupt
+            if (serial.rx_interrupt_enabled && serial.has_pending_rx) {
+                serial.cycles_until_rx_ready--;
+                if (serial.cycles_until_rx_ready == 0) {
+                    serial.rx_buffer.push(serial.pending_rx_byte);
+                    serial.has_pending_rx = false;
+                    cout << "[COM" << (i+1) << " RX: 0x" << hex << (int)serial.pending_rx_byte 
+                         << dec << "]\n";
+                    trigger_interrupt(serial.interrupt_number);
+                }
+            }
+        }
+        
+        // ==================== Keyboard ====================
+        if (keyboard_hw.interrupt_enabled && !keyboard_hw.scancode_queue.empty()) {
+            keyboard_hw.cycles_until_next_key--;
+            if (keyboard_hw.cycles_until_next_key == 0) {
+                u8 scancode = keyboard_hw.scancode_queue.front();
+                keyboard_hw.scancode_queue.pop();
+                keyboard_hw.last_scancode = scancode;
+                
+                cout << "[Keyboard: scancode 0x" << hex << (int)scancode << dec << "]\n";
+                trigger_interrupt(keyboard_hw.interrupt_number);
+                
+                // Set up next key
+                if (!keyboard_hw.scancode_queue.empty()) {
+                    keyboard_hw.cycles_until_next_key = keyboard_hw.typematic_delay;
+                }
+            }
+        }
+        
+        // ==================== Disk Controller ====================
+        if (disk_hw.operation_pending) {
+            disk_hw.cycles_until_complete--;
+            if (disk_hw.cycles_until_complete == 0) {
+                disk_hw.operation_pending = false;
+                disk_hw.last_status = 0x50;  // Ready
+                
+                cout << "[Disk: operation complete]\n";
+                if (disk_hw.interrupt_enabled) {
+                    trigger_interrupt(disk_hw.interrupt_number);
+                }
+            }
+        }
+        
+        // ==================== Mouse ====================
+        if (mouse_hw.interrupt_enabled && !mouse_hw.movement_queue.empty()) {
+            mouse_hw.cycles_until_movement--;
+            if (mouse_hw.cycles_until_movement == 0) {
+                mouse_hw.movement_queue.pop();
+                
+                cout << "[Mouse: movement detected]\n";
+                trigger_interrupt(mouse_hw.interrupt_number);
+                
+                if (!mouse_hw.movement_queue.empty()) {
+                    mouse_hw.cycles_until_movement = 50;  // Delay between movements
+                }
+            }
+        }
+        
+        // ==================== RTC ====================
+            if (rtc_hw.interrupt_enabled) {
+            rtc_hw.cycles_until_tick--;
+            if (rtc_hw.cycles_until_tick == 0) {
+                rtc_hw.cycles_until_tick = rtc_hw.periodic_interval;
+                trigger_interrupt(rtc_hw.interrupt_number);
+            }
+        }
+        
+        // ==================== Generic Hardware Devices ====================
+        for (auto& dev : hardware_devices) {
+            if (dev.enabled && dev.cycles_until_interrupt > 0) {
+                dev.cycles_until_interrupt--;
+                if (dev.cycles_until_interrupt == 0) {
+                    cout << "[HW Device: " << dev.name << " interrupt]\n";
+                    trigger_interrupt(dev.interrupt_number);
+                    
+                    if (dev.interrupt_interval > 0) {
+                        // Periodic interrupt
+                        dev.cycles_until_interrupt = dev.interrupt_interval;
+                    } else {
+                        // One-shot
+                        dev.enabled = false;
+                    }
+                }
             }
         }
     }
@@ -756,6 +950,7 @@ void run() {
     size_t pc = 0;
     
     while (pc < program.size()) {
+        update_hardware_devices();
         // Process all pending interrupts that can fire NOW
         bool processed_interrupt = true;
         while (processed_interrupt && !pending_interrupts.empty()) {
@@ -1693,6 +1888,240 @@ void run() {
                 }
                 io_bitmap_enabled = false;
                 cout << "I/O permission bitmap disabled\n";
+                continue;
+            }
+
+            if (op == "HWDEV") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("HWDEV: requires kernel mode");
+                }
+                if (toks.size() < 6) throw runtime_error("HWDEV needs 5 arguments");
+    
+                u8 dev_id = (u8)parse_int(toks[1]);
+                if (dev_id >= 16) throw runtime_error("HWDEV: device_id must be 0-15");
+    
+                HardwareDevice& dev = hardware_devices[dev_id];
+                dev.interrupt_number = (u8)parse_int(toks[2]);
+                dev.cycles_until_interrupt = parse_int(toks[3]);
+                dev.interrupt_interval = parse_int(toks[4]);
+                dev.name = toks[5];
+                dev.enabled = true;
+                
+                cout << "Configured HW device " << (int)dev_id << ": " << dev.name 
+                     << ", IRQ=" << (int)dev.interrupt_number << "\n";
+                continue;
+            }
+            
+            // HWDIS - Disable hardware device
+            // Syntax: HWDIS device_id
+            if (op == "HWDIS") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("HWDIS: requires kernel mode");
+                }
+                if (toks.size() < 2) throw runtime_error("HWDIS needs 1 argument");
+                
+                u8 dev_id = (u8)parse_int(toks[1]);
+                if (dev_id >= 16) throw runtime_error("HWDIS: device_id must be 0-15");
+                
+                hardware_devices[dev_id].enabled = false;
+                cout << "Disabled HW device " << (int)dev_id << "\n";
+                continue;
+            }
+            
+            // PITCFG - Configure PIT (Programmable Interval Timer)
+            // Syntax: PITCFG reload_value interrupt_num
+            if (op == "PITCFG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("PITCFG: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("PITCFG needs 2 arguments");
+    
+                pit_hw.reload_value = parse_int(toks[1]);
+                pit_hw.interrupt_number = (u8)parse_int(toks[2]);
+                pit_hw.current_count = 0;
+                pit_hw.counting = true;
+                pit_hw.interrupt_enabled = true;
+                
+                cout << "PIT configured: reload=" << pit_hw.reload_value 
+                     << ", IRQ=" << (int)pit_hw.interrupt_number << "\n";
+                continue;
+            }
+            
+            // PITSTOP - Stop PIT
+            if (op == "PITSTOP") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("PITSTOP: requires kernel mode");
+                }
+                pit_hw.counting = false;
+                cout << "PIT stopped\n";
+                continue;
+            }
+            
+            // PITSTART - Start PIT
+            if (op == "PITSTART") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("PITSTART: requires kernel mode");
+                }
+                pit_hw.counting = true;
+                cout << "PIT started\n";
+                continue;
+            }
+            
+            // KBDPUSH - Push scancode to keyboard buffer (simulates keypress)
+            // Syntax: KBDPUSH scancode
+            if (op == "KBDPUSH") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("KBDPUSH: requires kernel mode");
+    }
+    if (toks.size() < 2) throw runtime_error("KBDPUSH needs 1 argument");
+    
+                u8 scancode = (u8)parse_int(toks[1]);
+                keyboard_hw.scancode_queue.push(scancode);
+                
+                if (keyboard_hw.cycles_until_next_key == 0) {
+                    keyboard_hw.cycles_until_next_key = 10;  // Start processing
+                }
+                
+                cout << "Queued keyboard scancode 0x" << hex << (int)scancode << dec << "\n";
+                continue;
+            }
+            
+            // KBDCFG - Configure keyboard
+            // Syntax: KBDCFG interrupt_num delay
+            if (op == "KBDCFG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("KBDCFG: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("KBDCFG needs 2 arguments");
+                
+                keyboard_hw.interrupt_number = (u8)parse_int(toks[1]);
+                keyboard_hw.typematic_delay = parse_int(toks[2]);
+                keyboard_hw.interrupt_enabled = true;
+    
+                cout << "Keyboard configured: IRQ=" << (int)keyboard_hw.interrupt_number 
+                     << ", delay=" << keyboard_hw.typematic_delay << "\n";
+                continue;
+            }
+            
+            // SERIALCFG - Configure serial port
+            // Syntax: SERIALCFG port_num interrupt_num baud_delay
+            if (op == "SERIALCFG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SERIALCFG: requires kernel mode");
+                }
+                if (toks.size() < 4) throw runtime_error("SERIALCFG needs 3 arguments");
+    
+                u8 port = (u8)parse_int(toks[1]);
+                if (port >= 4) throw runtime_error("SERIALCFG: port must be 0-3");
+    
+                serial_hw[port].interrupt_number = (u8)parse_int(toks[2]);
+                serial_hw[port].baud_delay = parse_int(toks[3]);
+                serial_hw[port].tx_interrupt_enabled = true;
+                serial_hw[port].rx_interrupt_enabled = true;
+                
+                cout << "Serial port " << (int)port << " configured: IRQ=" 
+                     << (int)serial_hw[port].interrupt_number << "\n";
+                continue;
+            }
+            
+            // SERIALTX - Transmit byte via serial (triggers interrupt when done)
+            // Syntax: SERIALTX port_num byte
+            if (op == "SERIALTX") {
+                if (toks.size() < 3) throw runtime_error("SERIALTX needs 2 arguments");
+                
+                u8 port = (u8)parse_int(toks[1]);
+                if (port >= 4) throw runtime_error("SERIALTX: port must be 0-3");
+                
+                u8 byte = 0;
+                if (is_r8(toks[2])) byte = regs8[get_r8_index(toks[2])];
+                else if (is_number(toks[2])) byte = (u8)parse_int(toks[2]);
+                else throw runtime_error("SERIALTX: byte must be r8 or immediate");
+                
+                serial_hw[port].tx_buffer.push(byte);
+                serial_hw[port].cycles_until_tx_ready = serial_hw[port].baud_delay;
+                
+                cout << "Queued serial TX on port " << (int)port << "\n";
+                continue;
+            }
+            
+            // SERIALRX - Simulate receiving byte via serial
+            // Syntax: SERIALRX port_num byte
+            if (op == "SERIALRX") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("SERIALRX: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("SERIALRX needs 2 arguments");
+                
+                u8 port = (u8)parse_int(toks[1]);
+                if (port >= 4) throw runtime_error("SERIALRX: port must be 0-3");
+                
+                u8 byte = (u8)parse_int(toks[2]);
+                
+                serial_hw[port].pending_rx_byte = byte;
+                serial_hw[port].has_pending_rx = true;
+                serial_hw[port].cycles_until_rx_ready = serial_hw[port].baud_delay;
+                
+                cout << "Simulated serial RX on port " << (int)port << ": 0x" 
+                     << hex << (int)byte << dec << "\n";
+                continue;
+            }
+            
+            // DISKCMD - Start disk operation (triggers interrupt when done)
+            // Syntax: DISKCMD delay
+            if (op == "DISKCMD") {
+                if (toks.size() < 2) throw runtime_error("DISKCMD needs 1 argument");
+                
+                u32 delay = parse_int(toks[1]);
+                
+                disk_hw.operation_pending = true;
+                disk_hw.cycles_until_complete = delay;
+                disk_hw.last_status = 0x80;  // BSY (busy)
+                
+                cout << "Disk operation started (" << delay << " cycles)\n";
+                continue;
+            }
+            
+            // DISKCFG - Configure disk controller
+            // Syntax: DISKCFG interrupt_num operation_delay
+            if (op == "DISKCFG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("DISKCFG: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("DISKCFG needs 2 arguments");
+                
+                disk_hw.interrupt_number = (u8)parse_int(toks[1]);
+                disk_hw.operation_delay = parse_int(toks[2]);
+                disk_hw.interrupt_enabled = true;
+                
+                cout << "Disk configured: IRQ=" << (int)disk_hw.interrupt_number << "\n";
+                continue;
+            }
+            
+            // RTCCFG - Configure RTC periodic interrupt
+            // Syntax: RTCCFG interrupt_num interval
+            if (op == "RTCCFG") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("RTCCFG: requires kernel mode");
+                }
+                if (toks.size() < 3) throw runtime_error("RTCCFG needs 2 arguments");
+    
+                rtc_hw.interrupt_number = (u8)parse_int(toks[1]);
+                rtc_hw.periodic_interval = parse_int(toks[2]);
+                rtc_hw.cycles_until_tick = rtc_hw.periodic_interval;
+                rtc_hw.interrupt_enabled = true;
+                
+                cout << "RTC configured: IRQ=" << (int)rtc_hw.interrupt_number 
+                     << ", interval=" << rtc_hw.periodic_interval << "\n";
+                continue;
+            }
+            
+            // RTCSTOP - Stop RTC interrupts
+            if (op == "RTCSTOP") {
+                if (current_privilege_level != 0) {
+                    throw runtime_error("RTCSTOP: requires kernel mode");
+                }
+                rtc_hw.interrupt_enabled = false;
+                            cout << "RTC stopped\n";
                 continue;
             }
             
