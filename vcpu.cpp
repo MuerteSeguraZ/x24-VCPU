@@ -3637,6 +3637,1045 @@ void run() {
                 continue;
             }
 
+            
+            // ==================== AES INSTRUCTIONS ====================
+            
+            // AESENC - AES Single Round Encryption
+            // Syntax: AESENC key_reg state_reg
+            // Performs one round of AES encryption on 128-bit state using round key
+            // State is in r16_0-r16_7 (16 bytes), Key is in r16_8-r16_15
+            if (op == "AESENC") {
+                if (toks.size() < 3) throw runtime_error("AESENC needs 2 arguments: key_reg_base state_reg_base");
+                string key_base = toks[1], state_base = toks[2];
+                
+                // Extract base register indices
+                int key_idx = 0, state_idx = 0;
+                if (is_r16(key_base)) key_idx = get_r16_index(key_base);
+                else throw runtime_error("AESENC: key_base must be r16 register");
+                
+                if (is_r16(state_base)) state_idx = get_r16_index(state_base);
+                else throw runtime_error("AESENC: state_base must be r16 register");
+                
+                // AES S-Box (simplified version for demonstration)
+                static const u8 sbox[256] = {
+                    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+                    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+                    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+                    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+                    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+                    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+                    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+                    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+                    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+                    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+                    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+                    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+                    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+                    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+                    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+                    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+                };
+                
+                // Load 128-bit state (16 bytes from 8 r16 registers)
+                u8 state[16];
+                for (int i = 0; i < 8; i++) {
+                    state[i*2] = regs16[state_idx + i] & 0xFF;
+                    state[i*2+1] = (regs16[state_idx + i] >> 8) & 0xFF;
+                }
+                
+                // Load round key
+                u8 key[16];
+                for (int i = 0; i < 8; i++) {
+                    key[i*2] = regs16[key_idx + i] & 0xFF;
+                    key[i*2+1] = (regs16[key_idx + i] >> 8) & 0xFF;
+                }
+                
+                // SubBytes
+                for (int i = 0; i < 16; i++) {
+                    state[i] = sbox[state[i]];
+                }
+                
+                // ShiftRows (simplified for 128-bit)
+                u8 temp;
+                // Row 1: shift left by 1
+                temp = state[1];
+                state[1] = state[5];
+                state[5] = state[9];
+                state[9] = state[13];
+                state[13] = temp;
+                
+                // Row 2: shift left by 2
+                temp = state[2];
+                state[2] = state[10];
+                state[10] = temp;
+                temp = state[6];
+                state[6] = state[14];
+                state[14] = temp;
+                
+                // Row 3: shift left by 3
+                temp = state[15];
+                state[15] = state[11];
+                state[11] = state[7];
+                state[7] = state[3];
+                state[3] = temp;
+                
+                // MixColumns (simplified - just XOR for demonstration)
+                for (int i = 0; i < 16; i += 4) {
+                    u8 t = state[i] ^ state[i+1] ^ state[i+2] ^ state[i+3];
+                    state[i] ^= t;
+                    state[i+1] ^= t;
+                    state[i+2] ^= t;
+                    state[i+3] ^= t;
+                }
+                
+                // AddRoundKey
+                for (int i = 0; i < 16; i++) {
+                    state[i] ^= key[i];
+                }
+                
+                // Store result back
+                for (int i = 0; i < 8; i++) {
+                    regs16[state_idx + i] = state[i*2] | (state[i*2+1] << 8);
+                }
+                
+                cout << "AESENC: Performed AES encryption round\n";
+                continue;
+            }
+            
+            // AESDEC - AES Single Round Decryption
+            // Syntax: AESDEC key_reg state_reg
+            if (op == "AESDEC") {
+                if (toks.size() < 3) throw runtime_error("AESDEC needs 2 arguments: key_reg_base state_reg_base");
+                string key_base = toks[1], state_base = toks[2];
+                
+                int key_idx = 0, state_idx = 0;
+                if (is_r16(key_base)) key_idx = get_r16_index(key_base);
+                else throw runtime_error("AESDEC: key_base must be r16 register");
+                
+                if (is_r16(state_base)) state_idx = get_r16_index(state_base);
+                else throw runtime_error("AESDEC: state_base must be r16 register");
+                
+                // AES Inverse S-Box
+                static const u8 inv_sbox[256] = {
+                    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+                    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+                    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+                    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+                    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+                    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+                    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+                    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+                    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+                    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+                    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+                    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+                    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+                    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+                    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+                    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
+                };
+                
+                // Load state and key
+                u8 state[16], key[16];
+                for (int i = 0; i < 8; i++) {
+                    state[i*2] = regs16[state_idx + i] & 0xFF;
+                    state[i*2+1] = (regs16[state_idx + i] >> 8) & 0xFF;
+                    key[i*2] = regs16[key_idx + i] & 0xFF;
+                    key[i*2+1] = (regs16[key_idx + i] >> 8) & 0xFF;
+                }
+                
+                // Inverse operations (reverse order from AESENC)
+                // AddRoundKey
+                for (int i = 0; i < 16; i++) {
+                    state[i] ^= key[i];
+                }
+                
+                // InvMixColumns (simplified)
+                for (int i = 0; i < 16; i += 4) {
+                    u8 t = state[i] ^ state[i+1] ^ state[i+2] ^ state[i+3];
+                    state[i] ^= t;
+                    state[i+1] ^= t;
+                    state[i+2] ^= t;
+                    state[i+3] ^= t;
+                }
+                
+                // InvShiftRows
+                u8 temp;
+                // Row 1: shift right by 1 (= shift left by 3)
+                temp = state[13];
+                state[13] = state[9];
+                state[9] = state[5];
+                state[5] = state[1];
+                state[1] = temp;
+                
+                // Row 2: shift right by 2
+                temp = state[2];
+                state[2] = state[10];
+                state[10] = temp;
+                temp = state[6];
+                state[6] = state[14];
+                state[14] = temp;
+                
+                // Row 3: shift right by 3 (= shift left by 1)
+                temp = state[3];
+                state[3] = state[7];
+                state[7] = state[11];
+                state[11] = state[15];
+                state[15] = temp;
+                
+                // InvSubBytes
+                for (int i = 0; i < 16; i++) {
+                    state[i] = inv_sbox[state[i]];
+                }
+                
+                // Store result
+                for (int i = 0; i < 8; i++) {
+                    regs16[state_idx + i] = state[i*2] | (state[i*2+1] << 8);
+                }
+                
+                cout << "AESDEC: Performed AES decryption round\n";
+                continue;
+            }
+            
+            // AESIMC - AES Inverse Mix Columns
+            // Syntax: AESIMC state_reg
+            // Performs inverse mix columns transformation on state
+            if (op == "AESIMC") {
+                if (toks.size() < 2) throw runtime_error("AESIMC needs 1 argument: state_reg_base");
+                string state_base = toks[1];
+                
+                int state_idx = 0;
+                if (is_r16(state_base)) state_idx = get_r16_index(state_base);
+                else throw runtime_error("AESIMC: state_base must be r16 register");
+                
+                // Load state
+                u8 state[16];
+                for (int i = 0; i < 8; i++) {
+                    state[i*2] = regs16[state_idx + i] & 0xFF;
+                    state[i*2+1] = (regs16[state_idx + i] >> 8) & 0xFF;
+                }
+                
+                // Perform inverse mix columns (simplified)
+                for (int i = 0; i < 16; i += 4) {
+                    u8 a = state[i];
+                    u8 b = state[i+1];
+                    u8 c = state[i+2];
+                    u8 d = state[i+3];
+                    
+                    state[i]   = a ^ b ^ c;
+                    state[i+1] = b ^ c ^ d;
+                    state[i+2] = c ^ d ^ a;
+                    state[i+3] = d ^ a ^ b;
+                }
+                
+                // Store result
+                for (int i = 0; i < 8; i++) {
+                    regs16[state_idx + i] = state[i*2] | (state[i*2+1] << 8);
+                }
+                
+                continue;
+            }
+            
+            // AESKEYGENASSIST - AES Key Generation Assist
+            // Syntax: AESKEYGENASSIST rcon source_key dest
+            // Assists in AES key expansion using round constant
+            if (op == "AESKEYGENASSIST") {
+                if (toks.size() < 4) throw runtime_error("AESKEYGENASSIST needs 3 arguments");
+                string rcon_str = toks[1], src_key = toks[2], dst = toks[3];
+                
+                u8 rcon = 0;
+                if (is_r8(rcon_str)) rcon = regs8[get_r8_index(rcon_str)];
+                else if (is_number(rcon_str)) rcon = (u8)parse_int(rcon_str);
+                else throw runtime_error("AESKEYGENASSIST: rcon must be r8 or immediate");
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src_key)) src_idx = get_r16_index(src_key);
+                else throw runtime_error("AESKEYGENASSIST: source must be r16");
+                
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("AESKEYGENASSIST: dest must be r16");
+                
+                // AES S-Box for key schedule
+                static const u8 sbox[256] = {
+                    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+                    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+                    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+                    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+                    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+                    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+                    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+                    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+                    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+                    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+                    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+                    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+                    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+                    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+                    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+                    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+                };
+                
+                // Extract last 4 bytes of source key
+                u8 temp[4];
+                temp[0] = (regs16[src_idx + 6] >> 8) & 0xFF;
+                temp[1] = regs16[src_idx + 7] & 0xFF;
+                temp[2] = (regs16[src_idx + 7] >> 8) & 0xFF;
+                temp[3] = regs16[src_idx + 6] & 0xFF;
+                
+                // RotWord
+                u8 t = temp[0];
+                temp[0] = temp[1];
+                temp[1] = temp[2];
+                temp[2] = temp[3];
+                temp[3] = t;
+                
+                // SubWord
+                for (int i = 0; i < 4; i++) {
+                    temp[i] = sbox[temp[i]];
+                }
+                
+                // XOR with Rcon
+                temp[0] ^= rcon;
+                
+                // Store result
+                regs16[dst_idx] = temp[0] | (temp[1] << 8);
+                regs16[dst_idx + 1] = temp[2] | (temp[3] << 8);
+                
+                continue;
+            }
+
+            if (op == "AESENCLAST") {
+                if (toks.size() < 3) throw runtime_error("AESENCLAST needs 2 arguments: key_reg_base state_reg_base");
+                string key_base = toks[1], state_base = toks[2];
+    
+                int key_idx = 0, state_idx = 0;
+                if (is_r16(key_base)) key_idx = get_r16_index(key_base);
+                else throw runtime_error("AESENCLAST: key_base must be r16 register");
+    
+                if (is_r16(state_base)) state_idx = get_r16_index(state_base);
+                else throw runtime_error("AESENCLAST: state_base must be r16 register");
+    
+                // AES S-Box
+                static const u8 sbox[256] = {
+                    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+                    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+                    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+                    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+                    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+                    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+                    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+                    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+                    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+                    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+                    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+                    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+                    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+                    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+                    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+                    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+                };
+                
+                // Load state and key
+                u8 state[16], key[16];
+                for (int i = 0; i < 8; i++) {
+                    state[i*2] = regs16[state_idx + i] & 0xFF;
+                    state[i*2+1] = (regs16[state_idx + i] >> 8) & 0xFF;
+                    key[i*2] = regs16[key_idx + i] & 0xFF;
+                    key[i*2+1] = (regs16[key_idx + i] >> 8) & 0xFF;
+                }
+                
+                // SubBytes
+                for (int i = 0; i < 16; i++) {
+                    state[i] = sbox[state[i]];
+                }
+                
+                // ShiftRows
+                u8 temp;
+                temp = state[1];
+                state[1] = state[5];
+                state[5] = state[9];
+                state[9] = state[13];
+                state[13] = temp;
+                
+                temp = state[2];
+                state[2] = state[10];
+                state[10] = temp;
+                temp = state[6];
+                state[6] = state[14];
+                state[14] = temp;
+                
+                temp = state[15];
+                state[15] = state[11];
+                state[11] = state[7];
+                state[7] = state[3];
+                state[3] = temp;
+                
+                // AddRoundKey (NO MixColumns in last round)
+                for (int i = 0; i < 16; i++) {
+                    state[i] ^= key[i];
+                }
+                
+                // Store result
+                for (int i = 0; i < 8; i++) {
+                    regs16[state_idx + i] = state[i*2] | (state[i*2+1] << 8);
+                }
+                
+                cout << "AESENCLAST: Performed AES final encryption round\n";
+                continue;
+            }
+
+            // AESDECLAST - AES Last Round Decryption
+            // Syntax: AESDECLAST key_reg state_reg
+            // Performs the final AES decryption round (no InvMixColumns)
+            if (op == "AESDECLAST") {
+                if (toks.size() < 3) throw runtime_error("AESDECLAST needs 2 arguments: key_reg_base state_reg_base");
+                string key_base = toks[1], state_base = toks[2];
+    
+                int key_idx = 0, state_idx = 0;
+                if (is_r16(key_base)) key_idx = get_r16_index(key_base);
+                else throw runtime_error("AESDECLAST: key_base must be r16 register");
+    
+                if (is_r16(state_base)) state_idx = get_r16_index(state_base);
+                else throw runtime_error("AESDECLAST: state_base must be r16 register");
+                
+                // AES Inverse S-Box
+                static const u8 inv_sbox[256] = {
+                    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+                    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+                    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+                    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+                    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+                    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+                    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+                    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+                    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+                    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+                    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+                    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+                    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+                    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+                    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+                    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
+                };
+                
+                // Load state and key
+                u8 state[16], key[16];
+                for (int i = 0; i < 8; i++) {
+                    state[i*2] = regs16[state_idx + i] & 0xFF;
+                    state[i*2+1] = (regs16[state_idx + i] >> 8) & 0xFF;
+                    key[i*2] = regs16[key_idx + i] & 0xFF;
+                    key[i*2+1] = (regs16[key_idx + i] >> 8) & 0xFF;
+                }
+                
+                // AddRoundKey
+                for (int i = 0; i < 16; i++) {
+                    state[i] ^= key[i];
+                }
+                
+                // InvShiftRows
+                u8 temp;
+                temp = state[13];
+                state[13] = state[9];
+                state[9] = state[5];
+                state[5] = state[1];
+                state[1] = temp;
+                
+                temp = state[2];
+                state[2] = state[10];
+                state[10] = temp;
+                temp = state[6];
+                state[6] = state[14];
+                state[14] = temp;
+                
+                temp = state[3];
+                state[3] = state[7];
+                state[7] = state[11];
+                state[11] = state[15];
+                state[15] = temp;
+                
+                // InvSubBytes (NO InvMixColumns in last round)
+                for (int i = 0; i < 16; i++) {
+                    state[i] = inv_sbox[state[i]];
+                }
+                
+                // Store result
+                for (int i = 0; i < 8; i++) {
+                    regs16[state_idx + i] = state[i*2] | (state[i*2+1] << 8);
+                }
+                
+                cout << "AESDECLAST: Performed AES final decryption round\n";
+                continue;
+            }
+            
+            // SHA256RNDS2 - SHA-256 Rounds 2
+            // Syntax: SHA256RNDS2 wk msg state
+            // Performs 2 rounds of SHA-256 compression
+            if (op == "SHA256RNDS2") {
+                if (toks.size() < 4) throw runtime_error("SHA256RNDS2 needs 3 arguments: wk msg state");
+                string wk_reg = toks[1], msg_reg = toks[2], state_reg = toks[3];
+                
+                int wk_idx = 0, msg_idx = 0, state_idx = 0;
+                if (is_r16(wk_reg)) wk_idx = get_r16_index(wk_reg);
+                else throw runtime_error("SHA256RNDS2: wk must be r16");
+                if (is_r16(msg_reg)) msg_idx = get_r16_index(msg_reg);
+                else throw runtime_error("SHA256RNDS2: msg must be r16");
+                if (is_r16(state_reg)) state_idx = get_r16_index(state_reg);
+                else throw runtime_error("SHA256RNDS2: state must be r16");
+                
+                // Load state (8 x 32-bit = 16 bytes, using 8 r16 registers)
+                u32 state[8];
+                for (int i = 0; i < 8; i++) {
+                    u32 low = regs16[state_idx + i];
+                    u32 high = regs16[state_idx + i + 1];
+                    state[i] = low | (high << 16);
+                }
+                
+                // Load message schedule words
+                u32 w0 = regs16[msg_idx] | ((u32)regs16[msg_idx + 1] << 16);
+                u32 w1 = regs16[msg_idx + 2] | ((u32)regs16[msg_idx + 3] << 16);
+                
+            // Load K constants
+            u32 k0 = regs16[wk_idx] | ((u32)regs16[wk_idx + 1] << 16);
+            u32 k1 = regs16[wk_idx + 2] | ((u32)regs16[wk_idx + 3] << 16);
+                
+                // SHA-256 functions
+                auto ROTR = [](u32 x, int n) -> u32 { return (x >> n) | (x << (32 - n)); };
+                auto CH = [](u32 x, u32 y, u32 z) -> u32 { return (x & y) ^ (~x & z); };
+                auto MAJ = [](u32 x, u32 y, u32 z) -> u32 { return (x & y) ^ (x & z) ^ (y & z); };
+                auto SIGMA0 = [&](u32 x) -> u32 { return ROTR(x, 2) ^ ROTR(x, 13) ^ ROTR(x, 22); };
+                auto SIGMA1 = [&](u32 x) -> u32 { return ROTR(x, 6) ^ ROTR(x, 11) ^ ROTR(x, 25); };
+                
+                // Perform 2 rounds
+                for (int round = 0; round < 2; round++) {
+                    u32 w = (round == 0) ? w0 : w1;
+                    u32 k = (round == 0) ? k0 : k1;
+                    
+                    u32 a = state[0], b = state[1], c = state[2], d = state[3];
+                    u32 e = state[4], f = state[5], g = state[6], h = state[7];
+                    
+                    u32 t1 = h + SIGMA1(e) + CH(e, f, g) + k + w;
+                    u32 t2 = SIGMA0(a) + MAJ(a, b, c);
+                    
+                    h = g;
+                    g = f;
+                    f = e;
+                    e = d + t1;
+                    d = c;
+                    c = b;
+                    b = a;
+                    a = t1 + t2;
+                    
+                    state[0] = a; state[1] = b; state[2] = c; state[3] = d;
+                    state[4] = e; state[5] = f; state[6] = g; state[7] = h;
+                }
+                
+                // Store result
+                for (int i = 0; i < 4; i++) {
+                    regs16[state_idx + i*2] = state[i*2] & 0xFFFF;
+                    regs16[state_idx + i*2 + 1] = (state[i*2] >> 16) & 0xFFFF;
+                }
+                
+                continue;
+            }
+            
+            // SHA256MSG2 - SHA-256 Message Schedule 4-7
+            // Syntax: SHA256MSG2 src dest
+            // Completes SHA-256 message schedule expansion
+            if (op == "SHA256MSG2") {
+                if (toks.size() < 3) throw runtime_error("SHA256MSG2 needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src)) src_idx = get_r16_index(src);
+                else throw runtime_error("SHA256MSG2: src must be r16");
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("SHA256MSG2: dest must be r16");
+                
+                // Load values
+                u32 W[4], M[4];
+                for (int i = 0; i < 2; i++) {
+                    W[i*2] = regs16[dst_idx + i*2] | ((u32)regs16[dst_idx + i*2 + 1] << 16);
+                    W[i*2+1] = W[i*2];  // Duplicate for simplicity
+                    M[i*2] = regs16[src_idx + i*2] | ((u32)regs16[src_idx + i*2 + 1] << 16);
+                    M[i*2+1] = M[i*2];
+                }
+                
+                // SHA-256 sigma1 function
+                auto ROTR = [](u32 x, int n) -> u32 { return (x >> n) | (x << (32 - n)); };
+                auto sigma1 = [&](u32 x) -> u32 {
+                    return ROTR(x, 17) ^ ROTR(x, 19) ^ (x >> 10);
+                };
+                
+                // Complete message schedule: W[i] = W[i] + sigma1(M[i+14])
+                for (int i = 0; i < 4; i++) {
+                    W[i] += sigma1(M[i]);
+                }
+                
+                // Store result
+                for (int i = 0; i < 2; i++) {
+                    regs16[dst_idx + i*2] = W[i*2] & 0xFFFF;
+                    regs16[dst_idx + i*2 + 1] = (W[i*2] >> 16) & 0xFFFF;
+                }
+                
+                continue;
+            }
+            
+            // SHA1RNDS4 - SHA-1 Rounds 4
+            // Syntax: SHA1RNDS4 func wk state
+            // Performs 4 rounds of SHA-1 compression
+            if (op == "SHA1RNDS4") {
+                if (toks.size() < 4) throw runtime_error("SHA1RNDS4 needs 3 arguments: func wk state");
+                string func_str = toks[1], wk_reg = toks[2], state_reg = toks[3];
+                
+                u8 func = 0;
+                if (is_r8(func_str)) func = regs8[get_r8_index(func_str)];
+                else if (is_number(func_str)) func = (u8)parse_int(func_str);
+                else throw runtime_error("SHA1RNDS4: func must be r8 or immediate (0-3)");
+                
+                int wk_idx = 0, state_idx = 0;
+                if (is_r16(wk_reg)) wk_idx = get_r16_index(wk_reg);
+                else throw runtime_error("SHA1RNDS4: wk must be r16");
+                if (is_r16(state_reg)) state_idx = get_r16_index(state_reg);
+                else throw runtime_error("SHA1RNDS4: state must be r16");
+                
+                // Load state (5 x 32-bit values)
+                u32 a = regs16[state_idx] | ((u32)regs16[state_idx + 1] << 16);
+                u32 b = regs16[state_idx + 2] | ((u32)regs16[state_idx + 3] << 16);
+                u32 c = regs16[state_idx + 4] | ((u32)regs16[state_idx + 5] << 16);
+                u32 d = regs16[state_idx + 6] | ((u32)regs16[state_idx + 7] << 16);
+                u32 e = regs16[wk_idx + 6] | ((u32)regs16[wk_idx + 7] << 16);  // E from WK
+                
+                // Load message words
+                u32 w[4];
+                for (int i = 0; i < 4; i++) {
+                    w[i] = regs16[wk_idx + i*2] | ((u32)regs16[wk_idx + i*2 + 1] << 16);
+                }
+                
+                auto ROTL = [](u32 x, int n) -> u32 { return (x << n) | (x >> (32 - n)); };
+                
+                // SHA-1 functions based on round
+                auto F = [func](u32 b, u32 c, u32 d) -> u32 {
+                    switch (func & 3) {
+                        case 0: return (b & c) | (~b & d);  // CH
+                        case 1: return b ^ c ^ d;            // PARITY
+                        case 2: return (b & c) | (b & d) | (c & d);  // MAJ
+                        case 3: return b ^ c ^ d;            // PARITY
+                    }
+                    return 0;
+                };
+                
+                // K constants
+                static const u32 K[4] = {0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6};
+                
+                // Perform 4 rounds
+                for (int round = 0; round < 4; round++) {
+                    u32 temp = ROTL(a, 5) + F(b, c, d) + e + K[func & 3] + w[round];
+                    e = d;
+                    d = c;
+                    c = ROTL(b, 30);
+                    b = a;
+                    a = temp;
+                }
+                
+                // Store result
+                regs16[state_idx] = a & 0xFFFF;
+                regs16[state_idx + 1] = (a >> 16) & 0xFFFF;
+                regs16[state_idx + 2] = b & 0xFFFF;
+                regs16[state_idx + 3] = (b >> 16) & 0xFFFF;
+                regs16[state_idx + 4] = c & 0xFFFF;
+                regs16[state_idx + 5] = (c >> 16) & 0xFFFF;
+                regs16[state_idx + 6] = d & 0xFFFF;
+                regs16[state_idx + 7] = (d >> 16) & 0xFFFF;
+                
+                continue;
+            }
+
+            // SHA1NEXTE - SHA-1 Next E
+            // Syntax: SHA1NEXTE src dest
+            // Calculates next E value for SHA-1
+            if (op == "SHA1NEXTE") {
+                if (toks.size() < 3) throw runtime_error("SHA1NEXTE needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src)) src_idx = get_r16_index(src);
+                else throw runtime_error("SHA1NEXTE: src must be r16");
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("SHA1NEXTE: dest must be r16");
+                
+                // Load E value from source (first 32 bits)
+                u32 e = regs16[src_idx] | ((u32)regs16[src_idx + 1] << 16);
+                
+                // Load current state from dest
+                u32 state0 = regs16[dst_idx] | ((u32)regs16[dst_idx + 1] << 16);
+                
+                // Calculate next E: E0 + state0
+                u32 next_e = e + state0;
+                
+                // Store in first position of dest
+                regs16[dst_idx] = next_e & 0xFFFF;
+                regs16[dst_idx + 1] = (next_e >> 16) & 0xFFFF;
+                
+                continue;
+            }
+            
+            // SHA1MSG1 - SHA-1 Message Schedule 1
+            // Syntax: SHA1MSG1 src dest
+            // First step of SHA-1 message schedule
+            if (op == "SHA1MSG1") {
+                if (toks.size() < 3) throw runtime_error("SHA1MSG1 needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src)) src_idx = get_r16_index(src);
+                else throw runtime_error("SHA1MSG1: src must be r16");
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("SHA1MSG1: dest must be r16");
+                
+                // Load values (4 x 32-bit words)
+                u32 W[4], M[4];
+                for (int i = 0; i < 2; i++) {
+                    W[i*2] = regs16[dst_idx + i*2] | ((u32)regs16[dst_idx + i*2 + 1] << 16);
+                    W[i*2+1] = W[i*2];
+                    M[i*2] = regs16[src_idx + i*2] | ((u32)regs16[src_idx + i*2 + 1] << 16);
+                    M[i*2+1] = M[i*2];
+                }
+                
+                // XOR operation for message schedule
+                for (int i = 0; i < 4; i++) {
+                    W[i] ^= M[i];
+                }
+                
+                // Store result
+                for (int i = 0; i < 2; i++) {
+                    regs16[dst_idx + i*2] = W[i*2] & 0xFFFF;
+                    regs16[dst_idx + i*2 + 1] = (W[i*2] >> 16) & 0xFFFF;
+                }
+                
+                continue;
+            }
+            
+            // SHA1MSG2 - SHA-1 Message Schedule 2
+            // Syntax: SHA1MSG2 src dest
+            // Final step of SHA-1 message schedule
+            if (op == "SHA1MSG2") {
+                if (toks.size() < 3) throw runtime_error("SHA1MSG2 needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src)) src_idx = get_r16_index(src);
+                else throw runtime_error("SHA1MSG2: src must be r16");
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("SHA1MSG2: dest must be r16");
+                
+                // Load destination values (4 x 32-bit words from 8 x 16-bit registers)
+                u32 W[4];
+                for (int i = 0; i < 4; i++) {
+                    W[i] = regs16[dst_idx + i*2] | ((u32)regs16[dst_idx + i*2 + 1] << 16);
+                }
+                
+                // Load source values (4 x 32-bit words from 8 x 16-bit registers)
+                u32 M[4];
+                for (int i = 0; i < 4; i++) {
+                    M[i] = regs16[src_idx + i*2] | ((u32)regs16[src_idx + i*2 + 1] << 16);
+                }
+                
+                auto ROTL = [](u32 x, int n) -> u32 { return (x << n) | (x >> (32 - n)); };
+                
+                // XOR each W with corresponding M, then rotate all
+                for (int i = 0; i < 4; i++) {
+                    W[i] = ROTL(W[i] ^ M[i], 1);
+                }
+                
+                // Store all 4 results back
+                for (int i = 0; i < 4; i++) {
+                    regs16[dst_idx + i*2] = W[i] & 0xFFFF;
+                    regs16[dst_idx + i*2 + 1] = (W[i] >> 16) & 0xFFFF;
+                }
+                
+                continue;
+            }
+            
+            // ADCX - Add with Carry (uses CF, doesn't modify other flags)
+            // Syntax: ADCX source destination
+            // dest = dest + source + CF, updates only CF
+            if (op == "ADCX") {
+                if (toks.size() < 3) throw runtime_error("ADCX needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                bool is_16bit = false;
+                u32 src_val = 0, dst_val = 0;
+                
+                // Get source value
+                if (is_r8(src)) {
+                    src_val = regs8[get_r8_index(src)];
+                } else if (is_r16(src)) {
+                    src_val = regs16[get_r16_index(src)];
+                    is_16bit = true;
+                } else if (is_number(src)) {
+                    src_val = parse_int(src);
+                } else {
+                    throw runtime_error("ADCX: source must be register or immediate");
+                }
+                
+                // Get destination value
+                int dst_idx = -1;
+                if (is_r8(dst)) {
+                    dst_idx = get_r8_index(dst);
+                    dst_val = regs8[dst_idx];
+                } else if (is_r16(dst)) {
+                    dst_idx = get_r16_index(dst);
+                    dst_val = regs16[dst_idx];
+                    is_16bit = true;
+                } else {
+                    throw runtime_error("ADCX: destination must be register");
+                }
+                
+                // Perform addition with carry
+                u32 result = dst_val + src_val + (CF ? 1 : 0);
+                
+                // Update only CF (carry flag)
+                if (is_16bit) {
+                    CF = (result > 0xFFFF);
+                    regs16[dst_idx] = (u16)result;
+                } else {
+                    CF = (result > 0xFF);
+                    regs8[dst_idx] = (u8)result;
+                }
+                
+                // ADCX does NOT modify OF, SF, ZF, AF, PF
+                continue;
+            }
+            
+            // ADOX - Add with Overflow (uses OF, doesn't modify other flags)
+            // Syntax: ADOX source destination
+            // dest = dest + source + OF, updates only OF
+            if (op == "ADOX") {
+                if (toks.size() < 3) throw runtime_error("ADOX needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                bool is_16bit = false;
+                u32 src_val = 0, dst_val = 0;
+                
+                // Get source value
+                if (is_r8(src)) {
+                    src_val = regs8[get_r8_index(src)];
+                } else if (is_r16(src)) {
+                    src_val = regs16[get_r16_index(src)];
+                    is_16bit = true;
+                } else if (is_number(src)) {
+                    src_val = parse_int(src);
+                } else {
+                    throw runtime_error("ADOX: source must be register or immediate");
+                }
+                
+                // Get destination value
+                int dst_idx = -1;
+                if (is_r8(dst)) {
+                    dst_idx = get_r8_index(dst);
+                    dst_val = regs8[dst_idx];
+                } else if (is_r16(dst)) {
+                    dst_idx = get_r16_index(dst);
+                    dst_val = regs16[dst_idx];
+                    is_16bit = true;
+                } else {
+                    throw runtime_error("ADOX: destination must be register");
+                }
+                
+                // Perform addition with overflow flag
+                u32 result = dst_val + src_val + (OF ? 1 : 0);
+                
+                // Update only OF (overflow flag)
+                if (is_16bit) {
+                    OF = (result > 0xFFFF);
+                    regs16[dst_idx] = (u16)result;
+                } else {
+                    OF = (result > 0xFF);
+                    regs8[dst_idx] = (u8)result;
+                }
+                
+                // ADOX does NOT modify CF, SF, ZF, AF, PF
+                continue;
+            }
+            
+            // ==================== ADDITIONAL CRYPTO OPERATIONS ====================
+            
+            // CRC32 - Calculate CRC32 checksum
+            // Syntax: CRC32 data_reg length_reg result_reg
+            if (op == "CRC32") {
+                if (toks.size() < 4) throw runtime_error("CRC32 needs 3 arguments");
+                string data_reg = toks[1], len_reg = toks[2], result_reg = toks[3];
+                
+                u32 addr = 0;
+                if (is_r16(data_reg)) addr = regs16[get_r16_index(data_reg)];
+                else if (is_r8(data_reg)) addr = regs8[get_r8_index(data_reg)];
+                else throw runtime_error("CRC32: data_reg must be register");
+                
+                u32 length = 0;
+                if (is_r16(len_reg)) length = regs16[get_r16_index(len_reg)];
+                else if (is_r8(len_reg)) length = regs8[get_r8_index(len_reg)];
+                else if (is_number(len_reg)) length = parse_int(len_reg);
+                else throw runtime_error("CRC32: length must be register or immediate");
+                
+                // CRC32 polynomial (IEEE 802.3)
+                u32 crc = 0xFFFFFFFF;
+                for (u32 i = 0; i < length; i++) {
+                    u8 byte = mem_read8_at(addr + i);
+                    crc ^= byte;
+                    for (int j = 0; j < 8; j++) {
+                        if (crc & 1) {
+                            crc = (crc >> 1) ^ 0xEDB88320;
+                        } else {
+                            crc >>= 1;
+                        }
+                    }
+                }
+                crc ^= 0xFFFFFFFF;
+                
+                // Store result (lower 16 bits)
+                if (is_r16(result_reg)) {
+                    regs16[get_r16_index(result_reg)] = crc & 0xFFFF;
+                    if (get_r16_index(result_reg) + 1 < 32) {
+                        regs16[get_r16_index(result_reg) + 1] = (crc >> 16) & 0xFFFF;
+                    }
+                } else if (is_r8(result_reg)) {
+                    regs8[get_r8_index(result_reg)] = crc & 0xFF;
+                } else {
+                    throw runtime_error("CRC32: result must be register");
+                }
+                
+                continue;
+            }
+            
+            // PCLMULQDQ - Carry-less Multiplication (used in AES-GCM)
+            // Syntax: PCLMULQDQ src1 src2 dest
+            // Performs carry-less multiplication of two 64-bit values
+            if (op == "PCLMULQDQ") {
+                if (toks.size() < 4) throw runtime_error("PCLMULQDQ needs 3 arguments");
+                string src1 = toks[1], src2 = toks[2], dst = toks[3];
+                
+                // Get source values (as pairs of r16 registers)
+                u32 a = 0, b = 0;
+                if (is_r16(src1)) {
+                    int idx = get_r16_index(src1);
+                    a = regs16[idx] | ((u32)regs16[idx+1] << 16);
+                } else throw runtime_error("PCLMULQDQ: src1 must be r16");
+                
+                if (is_r16(src2)) {
+                    int idx = get_r16_index(src2);
+                    b = regs16[idx] | ((u32)regs16[idx+1] << 16);
+                } else throw runtime_error("PCLMULQDQ: src2 must be r16");
+                
+                // Carry-less multiplication (GF(2) polynomial multiplication)
+                u32 result_low = 0, result_high = 0;
+                for (int i = 0; i < 32; i++) {
+                    if (b & 1) {
+                        result_low ^= (a << i);
+                        if (i > 0) result_high ^= (a >> (32 - i));
+                    }
+                    b >>= 1;
+                }
+                
+                // Store result in destination (4 r16 registers for 64-bit result)
+                if (is_r16(dst)) {
+                    int idx = get_r16_index(dst);
+                    regs16[idx] = result_low & 0xFFFF;
+                    regs16[idx+1] = (result_low >> 16) & 0xFFFF;
+                    if (idx + 2 < 32) regs16[idx+2] = result_high & 0xFFFF;
+                    if (idx + 3 < 32) regs16[idx+3] = (result_high >> 16) & 0xFFFF;
+                } else throw runtime_error("PCLMULQDQ: dest must be r16");
+                
+                continue;
+            }
+            
+            // SHA256MSG1 - SHA-256 Message Schedule 0-3
+            // Syntax: SHA256MSG1 src dest
+            // Performs first part of SHA-256 message schedule expansion
+            if (op == "SHA256MSG1") {
+                if (toks.size() < 3) throw runtime_error("SHA256MSG1 needs 2 arguments");
+                string src = toks[1], dst = toks[2];
+                
+                int src_idx = 0, dst_idx = 0;
+                if (is_r16(src)) src_idx = get_r16_index(src);
+                else throw runtime_error("SHA256MSG1: src must be r16");
+                
+                if (is_r16(dst)) dst_idx = get_r16_index(dst);
+                else throw runtime_error("SHA256MSG1: dest must be r16");
+                
+                // Load 128-bit values (4 x 32-bit words)
+                u32 W[4], M[4];
+                for (int i = 0; i < 2; i++) {
+                    W[i*2] = regs16[dst_idx + i*2] | ((u32)regs16[dst_idx + i*2 + 1] << 16);
+                    W[i*2+1] = regs16[dst_idx + i*2 + 2] | ((u32)regs16[dst_idx + i*2 + 3] << 16);
+                    M[i*2] = regs16[src_idx + i*2] | ((u32)regs16[src_idx + i*2 + 1] << 16);
+                    M[i*2+1] = regs16[src_idx + i*2] | ((u32)regs16[src_idx + i*2 + 1] << 16);
+                }
+                
+                // SHA-256 sigma0 function
+                auto sigma0 = [](u32 x) -> u32 {
+                    return ((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3);
+                };
+                
+                // Compute W[i] = W[i] + sigma0(W[i+1])
+                for (int i = 0; i < 4; i++) {
+                    W[i] += sigma0(M[(i+1) % 4]);
+                }
+                
+                // Store result
+                for (int i = 0; i < 2; i++) {
+                    regs16[dst_idx + i*2] = W[i*2] & 0xFFFF;
+                    regs16[dst_idx + i*2 + 1] = (W[i*2] >> 16) & 0xFFFF;
+                }
+                
+                continue;
+            }
+            
+            // RDRAND - Read Random Number (hardware RNG)
+            // Syntax: RDRAND dest
+            // Fills destination register with random data
+            if (op == "RDRAND") {
+                if (toks.size() < 2) throw runtime_error("RDRAND needs 1 argument");
+                string dst = toks[1];
+                
+                // Generate random number using hardware cycle counter + simple PRNG
+                u32 rand_val = (hardware_cycle_counter * 1103515245 + 12345) & 0x7FFFFFFF;
+                
+                if (is_r8(dst)) {
+                    regs8[get_r8_index(dst)] = rand_val & 0xFF;
+                    CF = true;  // Success
+                } else if (is_r16(dst)) {
+                    regs16[get_r16_index(dst)] = rand_val & 0xFFFF;
+                    CF = true;
+                } else {
+                    throw runtime_error("RDRAND: dest must be register");
+                }
+                
+                continue;
+            }
+            
+            // RDSEED - Read Random Seed (entropy source)
+            // Syntax: RDSEED dest
+            // Similar to RDRAND but intended for seeding PRNGs
+            if (op == "RDSEED") {
+                if (toks.size() < 2) throw runtime_error("RDSEED needs 1 argument");
+                string dst = toks[1];
+                
+                // Use different mixing for seed vs random
+                u32 seed_val = ((hardware_cycle_counter ^ 0xDEADBEEF) * 2654435761) & 0xFFFFFFFF;
+                
+                if (is_r8(dst)) {
+                    regs8[get_r8_index(dst)] = seed_val & 0xFF;
+                    CF = true;
+                } else if (is_r16(dst)) {
+                    regs16[get_r16_index(dst)] = seed_val & 0xFFFF;
+                    CF = true;
+                } else {
+                    throw runtime_error("RDSEED: dest must be register");
+                }
+                
+                continue;
+            }
+
             // TEST - Bitwise AND that only sets flags (doesn't store result)
             // Syntax: TEST operand1 operand2
             // Commonly used to check if bits are set

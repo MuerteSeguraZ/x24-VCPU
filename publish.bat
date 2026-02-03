@@ -3,7 +3,7 @@
 git add --all
 
 set "MSG=%~1"
-if "%MSG%"=="" set "MSG=hardware device stuff"
+if "%MSG%"=="" set "MSG=encryption stuff"
 
 git status
 
